@@ -84,6 +84,21 @@ function Spinner() {
   );
 }
 
+// ── Responsive hook ───────────────────────────────────────────────────────────
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
+  return isMobile;
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
 export default function Home() {
   const [leads, setLeads] = useState([]);
   const [stats, setStats] = useState(null);
@@ -106,8 +121,9 @@ export default function Home() {
   const [bulkRunning, setBulkRunning] = useState(false);
   const cancelRef = useRef(false);
   const fileInputRef = useRef(null);
+  const isMobile = useIsMobile();
 
-  // ── Auto-load leads.csv on startup ───────────────────────────────────────
+  // ── Auto-load leads.csv ───────────────────────────────────────────────────
 
   useEffect(() => {
     async function autoLoad() {
@@ -146,10 +162,8 @@ export default function Home() {
     );
     if (!csvFiles.length) return;
     setIsProcessing(true);
-
     const parsed = [];
     let remaining = csvFiles.length;
-
     csvFiles.forEach((file) => {
       Papa.parse(file, {
         header: true,
@@ -205,7 +219,7 @@ export default function Home() {
     setBulkRunning(false);
   }, []);
 
-  // ── Single-row enrichment ─────────────────────────────────────────────────
+  // ── Enrichment ────────────────────────────────────────────────────────────
 
   const enrichOne = useCallback(async (lead) => {
     const key = lead.title;
@@ -221,22 +235,23 @@ export default function Home() {
           existingEmail: lead.emails || "",
         }),
       });
-      if (!res.ok) throw new Error("API error");
+      if (!res.ok) throw new Error();
       const data = await res.json();
       setLeads((prev) =>
-        prev.map((l) => {
-          if (l.title !== key) return l;
-          return {
-            ...l,
-            founder_name: data.founder_name || l.founder_name || "",
-            job_title: data.job_title || l.job_title || "",
-            emails: data.email || l.emails || "",
-            _enriched: true,
-          };
-        }),
+        prev.map((l) =>
+          l.title !== key
+            ? l
+            : {
+                ...l,
+                founder_name: data.founder_name || l.founder_name || "",
+                job_title: data.job_title || l.job_title || "",
+                emails: data.email || l.emails || "",
+                _enriched: true,
+              },
+        ),
       );
     } catch (err) {
-      console.error("Enrich failed for", key, err);
+      console.error("Enrich failed", err);
     }
     setEnriching((prev) => {
       const n = { ...prev };
@@ -244,8 +259,6 @@ export default function Home() {
       return n;
     });
   }, []);
-
-  // ── Bulk enrichment ───────────────────────────────────────────────────────
 
   const enrichAll = useCallback(async () => {
     const toEnrich = leads.filter(
@@ -277,19 +290,20 @@ export default function Home() {
             if (!res.ok) throw new Error();
             const data = await res.json();
             setLeads((prev) =>
-              prev.map((l) => {
-                if (l.title !== key) return l;
-                return {
-                  ...l,
-                  founder_name: data.founder_name || l.founder_name || "",
-                  job_title: data.job_title || l.job_title || "",
-                  emails: data.email || l.emails || "",
-                  _enriched: true,
-                };
-              }),
+              prev.map((l) =>
+                l.title !== key
+                  ? l
+                  : {
+                      ...l,
+                      founder_name: data.founder_name || l.founder_name || "",
+                      job_title: data.job_title || l.job_title || "",
+                      emails: data.email || l.emails || "",
+                      _enriched: true,
+                    },
+              ),
             );
           } catch {
-            /* silent fail */
+            /* silent */
           }
           setEnriching((prev) => {
             const n = { ...prev };
@@ -327,9 +341,7 @@ export default function Home() {
     filtered = [...filtered].sort((a, b) => {
       const av = a[sortCol] || "",
         bv = b[sortCol] || "";
-      if (av < bv) return -sortDir;
-      if (av > bv) return sortDir;
-      return 0;
+      return av < bv ? -sortDir : av > bv ? sortDir : 0;
     });
   }
 
@@ -343,15 +355,12 @@ export default function Home() {
     }
     setPage(1);
   };
-
   const enrichedCount = leads.filter((l) => l._enriched).length;
   const hasEmailCount = leads.filter((l) => l.emails && l.emails.trim()).length;
   const hasNameCount = leads.filter(
     (l) => l.founder_name && l.founder_name.trim(),
   ).length;
   const hasActiveFilters = search || filterState || filterCategory;
-
-  // ── Export ────────────────────────────────────────────────────────────────
 
   const handleExport = () => {
     const csv = leadsToCSV(filtered);
@@ -379,23 +388,25 @@ export default function Home() {
           color: "var(--muted)",
         }}
       >
-        <div
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
           style={{
             color: "var(--green)",
             animation: "spin 1s linear infinite",
           }}
         >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-            <circle
-              cx="12"
-              cy="12"
-              r="9"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeDasharray="28 16"
-            />
-          </svg>
-        </div>
+          <circle
+            cx="12"
+            cy="12"
+            r="9"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeDasharray="28 16"
+          />
+        </svg>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}>
           Loading leads…
         </div>
@@ -405,26 +416,53 @@ export default function Home() {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
+  // On mobile, only show key columns
+  const tableColumns = isMobile
+    ? [
+        ["title", "Business"],
+        ["state", "State"],
+        ["_category", "Category"],
+        ["emails", "Email"],
+      ]
+    : [
+        ["title", "Business name"],
+        ["phone", "Phone"],
+        ["city", "City"],
+        ["state", "State"],
+        ["totalScore", "Rating"],
+        ["_category", "Category"],
+        ["website", "Website"],
+        ["emails", "Email"],
+        ["founder_name", "Founder"],
+      ];
+
   return (
     <>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      <div style={{ maxWidth: 1400, margin: "0 auto", padding: "0 24px 80px" }}>
+      <div
+        style={{
+          maxWidth: 1400,
+          margin: "0 auto",
+          padding: isMobile ? "0 16px 60px" : "0 24px 80px",
+        }}
+      >
         {/* ── Header ── */}
         <header
           style={{
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
-            padding: "28px 0 24px",
+            padding: isMobile ? "20px 0 16px" : "28px 0 24px",
             borderBottom: "1px solid var(--border)",
-            marginBottom: 28,
+            marginBottom: isMobile ? 16 : 28,
+            gap: 12,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div
               style={{
-                width: 30,
-                height: 30,
+                width: 28,
+                height: 28,
                 borderRadius: 7,
                 background: "var(--green)",
                 display: "flex",
@@ -433,7 +471,7 @@ export default function Home() {
                 flexShrink: 0,
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
                 <path
                   d="M2 7h10M7 2l5 5-5 5"
                   stroke="#0a0a0b"
@@ -447,7 +485,7 @@ export default function Home() {
               <div
                 style={{
                   fontFamily: "var(--font-mono)",
-                  fontSize: 11,
+                  fontSize: 10,
                   color: "var(--green)",
                   letterSpacing: "0.06em",
                   marginBottom: 2,
@@ -458,7 +496,7 @@ export default function Home() {
               </div>
               <h1
                 style={{
-                  fontSize: 20,
+                  fontSize: isMobile ? 16 : 20,
                   fontWeight: 600,
                   letterSpacing: "-0.02em",
                   lineHeight: 1,
@@ -469,8 +507,15 @@ export default function Home() {
               </h1>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {leads.length > 0 && (
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              flexShrink: 0,
+            }}
+          >
+            {leads.length > 0 && !isMobile && (
               <span
                 style={{
                   fontFamily: "var(--font-mono)",
@@ -490,28 +535,21 @@ export default function Home() {
                   : "var(--surface2)",
                 color: filtered.length ? "#0a0a0b" : "var(--muted)",
                 fontWeight: 600,
-                fontSize: 13,
-                padding: "8px 18px",
+                fontSize: isMobile ? 12 : 13,
+                padding: isMobile ? "7px 12px" : "8px 18px",
                 borderRadius: 8,
                 opacity: filtered.length ? 1 : 0.4,
                 cursor: filtered.length ? "pointer" : "not-allowed",
               }}
             >
-              Export CSV
+              {isMobile ? "Export" : "Export CSV"}
             </button>
           </div>
         </header>
 
         {/* ── Stats ── */}
         {stats && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(6, 1fr)",
-              gap: 10,
-              marginBottom: 24,
-            }}
-          >
+          <div className="stats-grid">
             <StatCard label="Imported" value={stats.totalRows} />
             <StatCard label="Dupes removed" value={stats.dupes} color="amber" />
             <StatCard label="Unique leads" value={stats.unique} color="green" />
@@ -527,20 +565,7 @@ export default function Home() {
 
         {/* ── Enrichment bar ── */}
         {leads.length > 0 && (
-          <div
-            style={{
-              background: "var(--surface)",
-              border: "1px solid var(--border)",
-              borderRadius: 10,
-              padding: "14px 18px",
-              marginBottom: 16,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 16,
-              flexWrap: "wrap",
-            }}
-          >
+          <div className="enrich-bar">
             <div>
               <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 3 }}>
                 AI Enrichment
@@ -558,15 +583,22 @@ export default function Home() {
               <div style={{ fontSize: 12, color: "var(--muted)" }}>
                 {enrichedCount > 0
                   ? `${enrichedCount.toLocaleString()} leads enriched this session`
-                  : "Extract founder names and emails using AI — visits each website automatically"}
+                  : "Extract founder names and emails using AI"}
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+                flexWrap: "wrap",
+              }}
+            >
               {enrichProgress && (
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <div
                     style={{
-                      width: 140,
+                      width: 120,
                       height: 4,
                       background: "var(--surface2)",
                       borderRadius: 99,
@@ -605,7 +637,6 @@ export default function Home() {
                     borderRadius: 7,
                     padding: "7px 14px",
                     fontSize: 13,
-                    cursor: "pointer",
                   }}
                 >
                   Cancel
@@ -622,7 +653,6 @@ export default function Home() {
                     padding: "8px 16px",
                     borderRadius: 7,
                     cursor: leads.length ? "pointer" : "not-allowed",
-                    opacity: leads.length ? 1 : 0.4,
                     display: "flex",
                     alignItems: "center",
                     gap: 7,
@@ -636,15 +666,7 @@ export default function Home() {
         )}
 
         {/* ── Toolbar ── */}
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            marginBottom: 12,
-            alignItems: "stretch",
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="toolbar">
           <input
             type="text"
             placeholder={
@@ -657,7 +679,12 @@ export default function Home() {
               setSearch(e.target.value);
               setPage(1);
             }}
-            style={{ flex: "1 1 260px", fontSize: 14, padding: "9px 14px" }}
+            style={{
+              flex: "1 1 200px",
+              width: "auto",
+              fontSize: 14,
+              padding: "9px 14px",
+            }}
           />
           <select
             value={filterState}
@@ -666,6 +693,7 @@ export default function Home() {
               setPage(1);
             }}
             disabled={!leads.length}
+            style={{ width: "auto", flex: "0 1 auto" }}
           >
             <option value="">All states</option>
             {stats?.states.map((s) => (
@@ -681,6 +709,7 @@ export default function Home() {
               setPage(1);
             }}
             disabled={!leads.length}
+            style={{ width: "auto", flex: "0 1 auto" }}
           >
             <option value="">All categories</option>
             {ALL_CATEGORIES.map((c) => (
@@ -704,6 +733,7 @@ export default function Home() {
                 fontSize: 12,
                 cursor: "pointer",
                 whiteSpace: "nowrap",
+                flexShrink: 0,
               }}
             >
               {hideExcluded ? "✓ Hiding excluded" : "Show excluded"}
@@ -724,19 +754,13 @@ export default function Home() {
                 borderRadius: 6,
                 padding: "9px 14px",
                 fontSize: 13,
+                flexShrink: 0,
               }}
             >
               Clear
             </button>
           )}
-          <div
-            style={{
-              width: 1,
-              background: "var(--border)",
-              margin: "0 4px",
-              alignSelf: "stretch",
-            }}
-          />
+          {!isMobile && <div className="toolbar-divider" />}
           <button
             onClick={() => fileInputRef.current?.click()}
             style={{
@@ -744,15 +768,16 @@ export default function Home() {
               border: "1px solid var(--border)",
               color: "var(--text)",
               borderRadius: 6,
-              padding: "9px 16px",
+              padding: "9px 14px",
               fontSize: 13,
               display: "flex",
               alignItems: "center",
-              gap: 7,
+              gap: 6,
               whiteSpace: "nowrap",
+              flexShrink: 0,
             }}
           >
-            ↑ Add more CSVs
+            ↑ {isMobile ? "Add CSVs" : "Add more CSVs"}
           </button>
           <input
             ref={fileInputRef}
@@ -764,22 +789,10 @@ export default function Home() {
           />
         </div>
 
-        {/* ── File summary (only shows when extra files added) ── */}
+        {/* ── File summary ── */}
         {loadedFiles.length > 1 && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              background: "var(--surface)",
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              padding: "10px 14px",
-              marginBottom: 16,
-              fontSize: 13,
-            }}
-          >
-            <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+          <div className="file-summary">
+            <div className="file-summary-stats">
               <span style={{ color: "var(--muted)" }}>
                 <span
                   style={{
@@ -826,6 +839,7 @@ export default function Home() {
                 cursor: "pointer",
                 padding: "2px 6px",
                 borderRadius: 4,
+                flexShrink: 0,
               }}
               onMouseOver={(e) => (e.target.style.color = "var(--red)")}
               onMouseOut={(e) => (e.target.style.color = "var(--muted)")}
@@ -844,34 +858,13 @@ export default function Home() {
                 borderRadius: 10,
                 overflow: "hidden",
                 overflowX: "auto",
+                WebkitOverflowScrolling: "touch",
               }}
             >
-              <table>
-                <colgroup>
-                  <col style={{ width: "18%" }} />
-                  <col style={{ width: "10%" }} />
-                  <col style={{ width: "8%" }} />
-                  <col style={{ width: "5%" }} />
-                  <col style={{ width: "5%" }} />
-                  <col style={{ width: "13%" }} />
-                  <col style={{ width: "13%" }} />
-                  <col style={{ width: "14%" }} />
-                  <col style={{ width: "12%" }} />
-                  <col style={{ width: "5%" }} />
-                </colgroup>
+              <table style={{ minWidth: isMobile ? 400 : 900 }}>
                 <thead>
                   <tr>
-                    {[
-                      ["title", "Business name"],
-                      ["phone", "Phone"],
-                      ["city", "City"],
-                      ["state", "State"],
-                      ["totalScore", "Rating"],
-                      ["_category", "Category"],
-                      ["website", "Website"],
-                      ["emails", "Email"],
-                      ["founder_name", "Founder"],
-                    ].map(([col, label]) => (
+                    {tableColumns.map(([col, label]) => (
                       <th
                         key={col}
                         onClick={() => handleSort(col)}
@@ -887,7 +880,7 @@ export default function Home() {
                         )}
                       </th>
                     ))}
-                    <th>Enrich</th>
+                    {!isMobile && <th>Enrich</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -896,119 +889,159 @@ export default function Home() {
                     const isExcluded = lead._category === "EXCLUDED";
                     return (
                       <tr key={i} className={isExcluded ? "excluded" : ""}>
-                        <td title={lead.title} style={{ fontWeight: 500 }}>
-                          {lead.title}
-                        </td>
-                        <td
-                          style={{
-                            fontFamily: "var(--font-mono)",
-                            fontSize: 11,
-                          }}
-                        >
-                          {lead.phone || "—"}
-                        </td>
-                        <td>{lead.city || "—"}</td>
-                        <td>{lead.state || "—"}</td>
-                        <td
-                          style={{
-                            fontFamily: "var(--font-mono)",
-                            fontSize: 11,
-                          }}
-                        >
-                          {lead.totalScore || "—"}
-                        </td>
-                        <td>
-                          <Badge category={lead._category} />
-                        </td>
-                        <td>
-                          {lead.website ? (
-                            <a
-                              href={
-                                lead.website.startsWith("http")
-                                  ? lead.website
-                                  : `https://${lead.website}`
-                              }
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{
-                                color: "var(--blue)",
-                                textDecoration: "none",
-                                fontSize: 12,
-                              }}
-                            >
-                              {
-                                lead.website
-                                  .replace(/^https?:\/\/(www\.)?/, "")
-                                  .split("/")[0]
-                              }
-                            </a>
-                          ) : (
-                            "—"
-                          )}
-                        </td>
-                        <td
-                          style={{
-                            fontFamily: "var(--font-mono)",
-                            fontSize: 11,
-                          }}
-                        >
-                          {lead.emails ? (
-                            <span style={{ color: "var(--green)" }}>
-                              {lead.emails.split(",")[0].trim()}
-                            </span>
-                          ) : (
-                            <span style={{ color: "var(--muted)" }}>—</span>
-                          )}
-                        </td>
-                        <td style={{ fontSize: 12 }}>
-                          {lead.founder_name ? (
-                            <span style={{ color: "var(--text)" }}>
-                              {lead.founder_name}
-                            </span>
-                          ) : (
-                            <span style={{ color: "var(--muted)" }}>—</span>
-                          )}
-                        </td>
-                        <td>
-                          {!isExcluded && (
-                            <button
-                              onClick={() => enrichOne(lead)}
-                              disabled={isEnriching || !lead.website}
-                              title={
-                                !lead.website ? "No website" : "Enrich with AI"
-                              }
-                              style={{
-                                background: "none",
-                                border: "1px solid var(--border)",
-                                color: isEnriching
-                                  ? "var(--green)"
-                                  : "var(--muted)",
-                                borderRadius: 5,
-                                padding: "4px 8px",
-                                fontSize: 11,
-                                cursor: lead.website
-                                  ? "pointer"
-                                  : "not-allowed",
-                                opacity: lead.website ? 1 : 0.3,
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 4,
-                                transition: "all 0.15s",
-                              }}
-                              onMouseOver={(e) => {
-                                if (lead.website && !isEnriching)
+                        {tableColumns.map(([col]) => {
+                          if (col === "title")
+                            return (
+                              <td
+                                key={col}
+                                title={lead.title}
+                                style={{
+                                  fontWeight: 500,
+                                  maxWidth: isMobile ? 140 : "none",
+                                }}
+                              >
+                                {lead.title}
+                              </td>
+                            );
+                          if (col === "_category")
+                            return (
+                              <td key={col}>
+                                <Badge category={lead._category} />
+                              </td>
+                            );
+                          if (col === "website")
+                            return (
+                              <td key={col}>
+                                {lead.website ? (
+                                  <a
+                                    href={
+                                      lead.website.startsWith("http")
+                                        ? lead.website
+                                        : `https://${lead.website}`
+                                    }
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{
+                                      color: "var(--blue)",
+                                      textDecoration: "none",
+                                      fontSize: 12,
+                                    }}
+                                  >
+                                    {
+                                      lead.website
+                                        .replace(/^https?:\/\/(www\.)?/, "")
+                                        .split("/")[0]
+                                    }
+                                  </a>
+                                ) : (
+                                  "—"
+                                )}
+                              </td>
+                            );
+                          if (col === "emails")
+                            return (
+                              <td
+                                key={col}
+                                style={{
+                                  fontFamily: "var(--font-mono)",
+                                  fontSize: 11,
+                                }}
+                              >
+                                {lead.emails ? (
+                                  <span style={{ color: "var(--green)" }}>
+                                    {lead.emails.split(",")[0].trim()}
+                                  </span>
+                                ) : (
+                                  <span style={{ color: "var(--muted)" }}>
+                                    —
+                                  </span>
+                                )}
+                              </td>
+                            );
+                          if (col === "founder_name")
+                            return (
+                              <td key={col} style={{ fontSize: 12 }}>
+                                {lead.founder_name ? (
+                                  <span style={{ color: "var(--text)" }}>
+                                    {lead.founder_name}
+                                  </span>
+                                ) : (
+                                  <span style={{ color: "var(--muted)" }}>
+                                    —
+                                  </span>
+                                )}
+                              </td>
+                            );
+                          if (col === "phone")
+                            return (
+                              <td
+                                key={col}
+                                style={{
+                                  fontFamily: "var(--font-mono)",
+                                  fontSize: 11,
+                                }}
+                              >
+                                {lead.phone || "—"}
+                              </td>
+                            );
+                          if (col === "totalScore")
+                            return (
+                              <td
+                                key={col}
+                                style={{
+                                  fontFamily: "var(--font-mono)",
+                                  fontSize: 11,
+                                }}
+                              >
+                                {lead.totalScore || "—"}
+                              </td>
+                            );
+                          return <td key={col}>{lead[col] || "—"}</td>;
+                        })}
+                        {!isMobile && (
+                          <td>
+                            {!isExcluded && (
+                              <button
+                                onClick={() => enrichOne(lead)}
+                                disabled={isEnriching || !lead.website}
+                                title={
+                                  !lead.website
+                                    ? "No website"
+                                    : "Enrich with AI"
+                                }
+                                style={{
+                                  background: "none",
+                                  border: "1px solid var(--border)",
+                                  color: isEnriching
+                                    ? "var(--green)"
+                                    : "var(--muted)",
+                                  borderRadius: 5,
+                                  padding: "4px 8px",
+                                  fontSize: 11,
+                                  cursor: lead.website
+                                    ? "pointer"
+                                    : "not-allowed",
+                                  opacity: lead.website ? 1 : 0.3,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 4,
+                                  transition: "all 0.15s",
+                                }}
+                                onMouseOver={(e) => {
+                                  if (lead.website && !isEnriching)
+                                    e.currentTarget.style.borderColor =
+                                      "var(--green)";
+                                }}
+                                onMouseOut={(e) => {
                                   e.currentTarget.style.borderColor =
-                                    "var(--green)";
-                              }}
-                              onMouseOut={(e) => {
-                                e.currentTarget.style.borderColor =
-                                  "var(--border)";
-                              }}
-                            >
-                              {isEnriching ? <Spinner /> : "✦"}
-                            </button>
-                          )}
-                        </td>
+                                    "var(--border)";
+                                }}
+                              >
+                                {isEnriching ? <Spinner /> : "✦"}
+                              </button>
+                            )}
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -1017,14 +1050,7 @@ export default function Home() {
             </div>
 
             {/* ── Pagination ── */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginTop: 16,
-              }}
-            >
+            <div className="pagination">
               <span
                 style={{
                   fontFamily: "var(--font-mono)",
