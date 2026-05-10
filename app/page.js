@@ -1,49 +1,55 @@
-'use client';
+"use client";
 
-import { useState, useCallback, useRef } from 'react';
-import Papa from 'papaparse';
-import { processFiles, filterLeads, leadsToCSV } from '@/lib/processor';
+import { useState, useCallback, useRef, useEffect } from "react";
+import Papa from "papaparse";
+import { processFiles, filterLeads, leadsToCSV } from "@/lib/processor";
 
 const PAGE_SIZE = 30;
-const BATCH_SIZE = 5;      // concurrent enrichment requests
-const BATCH_DELAY = 1200;   // ms between batches
+const BATCH_SIZE = 5;
+const BATCH_DELAY = 1200;
 
 const CAT_BADGE = {
-  'Investment BA':    'badge-investment',
-  'SMSF':            'badge-smsf',
-  'Owner-occupier':  'badge-owner',
-  'Off-the-plan':    'badge-offplan',
-  'Project sales':   'badge-project',
-  'Property advisor':'badge-advisor',
-  'Uncategorised':   'badge-unknown',
-  'EXCLUDED':        'badge-excluded',
+  "Investment BA": "badge-investment",
+  SMSF: "badge-smsf",
+  "Owner-occupier": "badge-owner",
+  "Off-the-plan": "badge-offplan",
+  "Project sales": "badge-project",
+  "Property advisor": "badge-advisor",
+  Uncategorised: "badge-unknown",
+  EXCLUDED: "badge-excluded",
 };
 
 const ALL_CATEGORIES = [
-  'Investment BA', 'SMSF', 'Owner-occupier',
-  'Off-the-plan', 'Project sales', 'Property advisor',
-  'Uncategorised', 'EXCLUDED',
+  "Investment BA",
+  "SMSF",
+  "Owner-occupier",
+  "Off-the-plan",
+  "Project sales",
+  "Property advisor",
+  "Uncategorised",
+  "EXCLUDED",
 ];
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function StatCard({ label, value, color }) {
   const colorMap = {
-    green:   'var(--green)',
-    amber:   'var(--amber)',
-    red:     'var(--red)',
-    blue:    'var(--blue)',
-    default: 'var(--text)',
+    green: "var(--green)",
+    amber: "var(--amber)",
+    red: "var(--red)",
+    blue: "var(--blue)",
+    default: "var(--text)",
   };
   return (
     <div className="stat-card fade-up">
       <div className="stat-label">{label}</div>
-      <div className="stat-value" style={{ color: colorMap[color] || colorMap.default }}>
-        {value?.toLocaleString() ?? '—'}
+      <div
+        className="stat-value"
+        style={{ color: colorMap[color] || colorMap.default }}
+      >
+        {value?.toLocaleString() ?? "—"}
       </div>
     </div>
   );
@@ -51,60 +57,100 @@ function StatCard({ label, value, color }) {
 
 function Badge({ category }) {
   return (
-    <span className={`badge ${CAT_BADGE[category] || 'badge-unknown'}`}>
+    <span className={`badge ${CAT_BADGE[category] || "badge-unknown"}`}>
       {category}
     </span>
   );
 }
 
-// Spinner SVG
 function Spinner() {
   return (
-    <svg width="12" height="12" viewBox="0 0 12 12" style={{ animation: 'spin 0.8s linear infinite' }}>
-      <circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="14 8" />
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      style={{ animation: "spin 0.8s linear infinite", display: "block" }}
+    >
+      <circle
+        cx="6"
+        cy="6"
+        r="4.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeDasharray="14 8"
+      />
     </svg>
   );
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
-
 export default function Home() {
-  const [leads, setLeads]               = useState([]);
-  const [stats, setStats]               = useState(null);
-  const [loadedFiles, setLoadedFiles]   = useState([]);
-  const [isDragging, setIsDragging]     = useState(false);
+  const [leads, setLeads] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [loadedFiles, setLoadedFiles] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isAutoLoading, setIsAutoLoading] = useState(true);
 
-  // Filters
-  const [search, setSearch]               = useState('');
-  const [filterState, setFilterState]     = useState('');
-  const [filterCategory, setFilterCategory] = useState('');
-  const [hideExcluded, setHideExcluded]   = useState(true);
+  const [search, setSearch] = useState("");
+  const [filterState, setFilterState] = useState("");
+  const [filterCategory, setFilterCategory] = useState("");
+  const [hideExcluded, setHideExcluded] = useState(true);
 
-  // Table
-  const [page, setPage]     = useState(1);
+  const [page, setPage] = useState(1);
   const [sortCol, setSortCol] = useState(null);
   const [sortDir, setSortDir] = useState(1);
 
-  // Enrichment state
-  const [enriching, setEnriching]         = useState({}); // { [key]: true } rows in flight
-  const [enrichProgress, setEnrichProgress] = useState(null); // { done, total }
-  const [bulkRunning, setBulkRunning]     = useState(false);
+  const [enriching, setEnriching] = useState({});
+  const [enrichProgress, setEnrichProgress] = useState(null);
+  const [bulkRunning, setBulkRunning] = useState(false);
   const cancelRef = useRef(false);
-
   const fileInputRef = useRef(null);
+
+  // ── Auto-load leads.csv on startup ───────────────────────────────────────
+
+  useEffect(() => {
+    async function autoLoad() {
+      try {
+        const res = await fetch("/leads.csv");
+        if (!res.ok) {
+          setIsAutoLoading(false);
+          return;
+        }
+        const text = await res.text();
+        Papa.parse(text, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (result) => {
+            const file = { name: "leads.csv", rows: result.data };
+            const { leads: newLeads, stats: newStats } = processFiles([file]);
+            setLeads(newLeads);
+            setStats(newStats);
+            setLoadedFiles([file]);
+            setIsAutoLoading(false);
+          },
+          error: () => setIsAutoLoading(false),
+        });
+      } catch {
+        setIsAutoLoading(false);
+      }
+    }
+    autoLoad();
+  }, []);
 
   // ── File handling ─────────────────────────────────────────────────────────
 
   const handleFiles = useCallback((newFiles) => {
-    const csvFiles = [...newFiles].filter(f => f.name.toLowerCase().endsWith('.csv'));
+    const csvFiles = [...newFiles].filter((f) =>
+      f.name.toLowerCase().endsWith(".csv"),
+    );
     if (!csvFiles.length) return;
     setIsProcessing(true);
 
     const parsed = [];
     let remaining = csvFiles.length;
 
-    csvFiles.forEach(file => {
+    csvFiles.forEach((file) => {
       Papa.parse(file, {
         header: true,
         skipEmptyLines: true,
@@ -112,14 +158,15 @@ export default function Home() {
           parsed.push({ name: file.name, rows: result.data });
           remaining--;
           if (remaining === 0) {
-            setLoadedFiles(prev => {
+            setLoadedFiles((prev) => {
               const combined = [...prev];
-              parsed.forEach(p => {
-                const idx = combined.findIndex(f => f.name === p.name);
+              parsed.forEach((p) => {
+                const idx = combined.findIndex((f) => f.name === p.name);
                 if (idx >= 0) combined[idx] = p;
                 else combined.push(p);
               });
-              const { leads: newLeads, stats: newStats } = processFiles(combined);
+              const { leads: newLeads, stats: newStats } =
+                processFiles(combined);
               setLeads(newLeads);
               setStats(newStats);
               setPage(1);
@@ -128,24 +175,30 @@ export default function Home() {
             });
           }
         },
-        error: () => { remaining--; if (remaining === 0) setIsProcessing(false); },
+        error: () => {
+          remaining--;
+          if (remaining === 0) setIsProcessing(false);
+        },
       });
     });
   }, []);
 
-  const onDrop = useCallback((e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    handleFiles(e.dataTransfer.files);
-  }, [handleFiles]);
+  const onDrop = useCallback(
+    (e) => {
+      e.preventDefault();
+      setIsDragging(false);
+      handleFiles(e.dataTransfer.files);
+    },
+    [handleFiles],
+  );
 
   const clearAll = useCallback(() => {
     setLoadedFiles([]);
     setLeads([]);
     setStats(null);
-    setSearch('');
-    setFilterState('');
-    setFilterCategory('');
+    setSearch("");
+    setFilterState("");
+    setFilterCategory("");
     setPage(1);
     setEnriching({});
     setEnrichProgress(null);
@@ -157,116 +210,98 @@ export default function Home() {
   const enrichOne = useCallback(async (lead) => {
     const key = lead.title;
     if (!lead.website) return;
-
-    setEnriching(prev => ({ ...prev, [key]: true }));
-
+    setEnriching((prev) => ({ ...prev, [key]: true }));
     try {
-      const res = await fetch('/api/enrich', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch("/api/enrich", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          website:       lead.website,
-          businessName:  lead.title,
-          existingEmail: lead.emails || '',
+          website: lead.website,
+          businessName: lead.title,
+          existingEmail: lead.emails || "",
         }),
       });
-
-      if (!res.ok) throw new Error('API error');
+      if (!res.ok) throw new Error("API error");
       const data = await res.json();
-
-      setLeads(prev => prev.map(l => {
-        if (l.title !== key) return l;
-        return {
-          ...l,
-          founder_name: data.founder_name || l.founder_name || '',
-          job_title:    data.job_title    || l.job_title    || '',
-          emails:       data.email        || l.emails       || '',
-          _enriched:    true,
-        };
-      }));
+      setLeads((prev) =>
+        prev.map((l) => {
+          if (l.title !== key) return l;
+          return {
+            ...l,
+            founder_name: data.founder_name || l.founder_name || "",
+            job_title: data.job_title || l.job_title || "",
+            emails: data.email || l.emails || "",
+            _enriched: true,
+          };
+        }),
+      );
     } catch (err) {
-      console.error('Enrich failed for', key, err);
+      console.error("Enrich failed for", key, err);
     }
-
-    setEnriching(prev => {
-      const next = { ...prev };
-      delete next[key];
-      return next;
+    setEnriching((prev) => {
+      const n = { ...prev };
+      delete n[key];
+      return n;
     });
   }, []);
 
   // ── Bulk enrichment ───────────────────────────────────────────────────────
 
   const enrichAll = useCallback(async () => {
-    // Only enrich leads that have a website and aren't EXCLUDED
-    const toEnrich = leads.filter(l =>
-      l.website && l._category !== 'EXCLUDED'
+    const toEnrich = leads.filter(
+      (l) => l.website && l._category !== "EXCLUDED",
     );
-
     if (!toEnrich.length) return;
-
     cancelRef.current = false;
     setBulkRunning(true);
     setEnrichProgress({ done: 0, total: toEnrich.length });
-
     let done = 0;
-
-    // Process in batches of BATCH_SIZE
     for (let i = 0; i < toEnrich.length; i += BATCH_SIZE) {
       if (cancelRef.current) break;
-
       const batch = toEnrich.slice(i, i + BATCH_SIZE);
-
-      await Promise.all(batch.map(async (lead) => {
-        if (cancelRef.current) return;
-        const key = lead.title;
-
-        setEnriching(prev => ({ ...prev, [key]: true }));
-
-        try {
-          const res = await fetch('/api/enrich', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              website:       lead.website,
-              businessName:  lead.title,
-              existingEmail: lead.emails || '',
-            }),
+      await Promise.all(
+        batch.map(async (lead) => {
+          if (cancelRef.current) return;
+          const key = lead.title;
+          setEnriching((prev) => ({ ...prev, [key]: true }));
+          try {
+            const res = await fetch("/api/enrich", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                website: lead.website,
+                businessName: lead.title,
+                existingEmail: lead.emails || "",
+              }),
+            });
+            if (!res.ok) throw new Error();
+            const data = await res.json();
+            setLeads((prev) =>
+              prev.map((l) => {
+                if (l.title !== key) return l;
+                return {
+                  ...l,
+                  founder_name: data.founder_name || l.founder_name || "",
+                  job_title: data.job_title || l.job_title || "",
+                  emails: data.email || l.emails || "",
+                  _enriched: true,
+                };
+              }),
+            );
+          } catch {
+            /* silent fail */
+          }
+          setEnriching((prev) => {
+            const n = { ...prev };
+            delete n[key];
+            return n;
           });
-
-          if (!res.ok) throw new Error();
-          const data = await res.json();
-
-          setLeads(prev => prev.map(l => {
-            if (l.title !== key) return l;
-            return {
-              ...l,
-              founder_name: data.founder_name || l.founder_name || '',
-              job_title:    data.job_title    || l.job_title    || '',
-              emails:       data.email        || l.emails       || '',
-              _enriched:    true,
-            };
-          }));
-        } catch {
-          // Silent fail — row just stays as-is
-        }
-
-        setEnriching(prev => {
-          const next = { ...prev };
-          delete next[key];
-          return next;
-        });
-
-        done++;
-        setEnrichProgress({ done, total: toEnrich.length });
-      }));
-
-      // Pause between batches to respect rate limits
-      if (i + BATCH_SIZE < toEnrich.length) {
-        await sleep(BATCH_DELAY);
-      }
+          done++;
+          setEnrichProgress({ done, total: toEnrich.length });
+        }),
+      );
+      if (i + BATCH_SIZE < toEnrich.length) await sleep(BATCH_DELAY);
     }
-
     setBulkRunning(false);
     setEnrichProgress(null);
     cancelRef.current = false;
@@ -283,90 +318,164 @@ export default function Home() {
 
   let filtered = filterLeads(leads, {
     search,
-    state:    filterState,
+    state: filterState,
     category: filterCategory,
   });
-
-  if (hideExcluded) {
-    filtered = filtered.filter(l => l._category !== 'EXCLUDED');
-  }
-
+  if (hideExcluded)
+    filtered = filtered.filter((l) => l._category !== "EXCLUDED");
   if (sortCol) {
     filtered = [...filtered].sort((a, b) => {
-      const av = a[sortCol] || '';
-      const bv = b[sortCol] || '';
+      const av = a[sortCol] || "",
+        bv = b[sortCol] || "";
       if (av < bv) return -sortDir;
-      if (av > bv) return  sortDir;
+      if (av > bv) return sortDir;
       return 0;
     });
   }
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const paginated  = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
+  const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const handleSort = (col) => {
-    if (sortCol === col) setSortDir(d => d * -1);
-    else { setSortCol(col); setSortDir(1); }
+    if (sortCol === col) setSortDir((d) => d * -1);
+    else {
+      setSortCol(col);
+      setSortDir(1);
+    }
     setPage(1);
   };
 
-  // ── Enrichment stats ──────────────────────────────────────────────────────
-  const enrichedCount  = leads.filter(l => l._enriched).length;
-  const hasEmailCount  = leads.filter(l => l.emails && l.emails.trim()).length;
-  const hasNameCount   = leads.filter(l => l.founder_name && l.founder_name.trim()).length;
+  const enrichedCount = leads.filter((l) => l._enriched).length;
+  const hasEmailCount = leads.filter((l) => l.emails && l.emails.trim()).length;
+  const hasNameCount = leads.filter(
+    (l) => l.founder_name && l.founder_name.trim(),
+  ).length;
+  const hasActiveFilters = search || filterState || filterCategory;
 
   // ── Export ────────────────────────────────────────────────────────────────
 
   const handleExport = () => {
-    const csv  = leadsToCSV(filtered);
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
+    const csv = leadsToCSV(filtered);
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
     a.download = `buyers_agents_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  const hasActiveFilters = search || filterState || filterCategory;
+  // ── Loading screen ────────────────────────────────────────────────────────
+
+  if (isAutoLoading) {
+    return (
+      <div
+        style={{
+          height: "100vh",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 16,
+          color: "var(--muted)",
+        }}
+      >
+        <div
+          style={{
+            color: "var(--green)",
+            animation: "spin 1s linear infinite",
+          }}
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <circle
+              cx="12"
+              cy="12"
+              r="9"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeDasharray="28 16"
+            />
+          </svg>
+        </div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}>
+          Loading leads…
+        </div>
+      </div>
+    );
+  }
 
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <>
-      {/* Spinner keyframe */}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 24px 80px' }}>
-
+      <div style={{ maxWidth: 1400, margin: "0 auto", padding: "0 24px 80px" }}>
         {/* ── Header ── */}
-        <header style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '28px 0 24px', borderBottom: '1px solid var(--border)', marginBottom: 28,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{
-              width: 30, height: 30, borderRadius: 7,
-              background: 'var(--green)', display: 'flex',
-              alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-            }}>
+        <header
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "28px 0 24px",
+            borderBottom: "1px solid var(--border)",
+            marginBottom: 28,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 7,
+                background: "var(--green)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path d="M2 7h10M7 2l5 5-5 5" stroke="#0a0a0b" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                <path
+                  d="M2 7h10M7 2l5 5-5 5"
+                  stroke="#0a0a0b"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
               </svg>
             </div>
             <div>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--green)', letterSpacing: '0.06em', marginBottom: 2 }}>
+              <div
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  color: "var(--green)",
+                  letterSpacing: "0.06em",
+                  marginBottom: 2,
+                }}
+              >
                 LEAD SCRAPER
               </div>
-              <h1 style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', lineHeight: 1 }}>
+              <h1
+                style={{
+                  fontSize: 20,
+                  fontWeight: 600,
+                  letterSpacing: "-0.02em",
+                  lineHeight: 1,
+                }}
+              >
                 Buyers Agent Australia
               </h1>
             </div>
           </div>
-
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             {leads.length > 0 && (
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' }}>
+              <span
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  color: "var(--muted)",
+                }}
+              >
                 {filtered.length.toLocaleString()} leads
               </span>
             )}
@@ -374,12 +483,16 @@ export default function Home() {
               onClick={handleExport}
               disabled={!filtered.length}
               style={{
-                background: filtered.length ? 'var(--green)' : 'var(--surface2)',
-                color: filtered.length ? '#0a0a0b' : 'var(--muted)',
-                fontWeight: 600, fontSize: 13, padding: '8px 18px',
-                borderRadius: 8, transition: 'opacity 0.15s',
+                background: filtered.length
+                  ? "var(--green)"
+                  : "var(--surface2)",
+                color: filtered.length ? "#0a0a0b" : "var(--muted)",
+                fontWeight: 600,
+                fontSize: 13,
+                padding: "8px 18px",
+                borderRadius: 8,
                 opacity: filtered.length ? 1 : 0.4,
-                cursor: filtered.length ? 'pointer' : 'not-allowed',
+                cursor: filtered.length ? "pointer" : "not-allowed",
               }}
             >
               Export CSV
@@ -389,73 +502,108 @@ export default function Home() {
 
         {/* ── Stats ── */}
         {stats && (
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)',
-            gap: 10, marginBottom: 24,
-          }}>
-            <StatCard label="Imported"      value={stats.totalRows}   />
-            <StatCard label="Dupes removed" value={stats.dupes}       color="amber" />
-            <StatCard label="Unique leads"  value={stats.unique}      color="green" />
-            <StatCard label="Categorised"   value={stats.categorised} color="blue"  />
-            <StatCard label="With email"    value={hasEmailCount}     color="green" />
-            <StatCard label="With name"     value={hasNameCount}      color="blue"  />
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(6, 1fr)",
+              gap: 10,
+              marginBottom: 24,
+            }}
+          >
+            <StatCard label="Imported" value={stats.totalRows} />
+            <StatCard label="Dupes removed" value={stats.dupes} color="amber" />
+            <StatCard label="Unique leads" value={stats.unique} color="green" />
+            <StatCard
+              label="Categorised"
+              value={stats.categorised}
+              color="blue"
+            />
+            <StatCard label="With email" value={hasEmailCount} color="green" />
+            <StatCard label="With name" value={hasNameCount} color="blue" />
           </div>
         )}
 
         {/* ── Enrichment bar ── */}
         {leads.length > 0 && (
-          <div style={{
-            background: 'var(--surface)', border: '1px solid var(--border)',
-            borderRadius: 10, padding: '14px 18px', marginBottom: 16,
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            gap: 16, flexWrap: 'wrap',
-          }}>
+          <div
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              padding: "14px 18px",
+              marginBottom: 16,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 16,
+              flexWrap: "wrap",
+            }}
+          >
             <div>
               <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 3 }}>
                 AI Enrichment
-                <span style={{
-                  fontFamily: 'var(--font-mono)', fontSize: 11,
-                  color: 'var(--muted)', marginLeft: 10,
-                }}>
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    marginLeft: 10,
+                  }}
+                >
                   gpt-4o-mini
                 </span>
               </div>
-              <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>
                 {enrichedCount > 0
                   ? `${enrichedCount.toLocaleString()} leads enriched this session`
-                  : 'Extract founder names and emails using AI — runs on each website automatically'
-                }
+                  : "Extract founder names and emails using AI — visits each website automatically"}
               </div>
             </div>
-
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              {/* Progress indicator */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               {enrichProgress && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  {/* Progress bar */}
-                  <div style={{
-                    width: 140, height: 4, background: 'var(--surface2)',
-                    borderRadius: 99, overflow: 'hidden',
-                  }}>
-                    <div style={{
-                      height: '100%', background: 'var(--green)',
-                      width: `${(enrichProgress.done / enrichProgress.total) * 100}%`,
-                      transition: 'width 0.3s ease', borderRadius: 99,
-                    }} />
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div
+                    style={{
+                      width: 140,
+                      height: 4,
+                      background: "var(--surface2)",
+                      borderRadius: 99,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        background: "var(--green)",
+                        borderRadius: 99,
+                        width: `${(enrichProgress.done / enrichProgress.total) * 100}%`,
+                        transition: "width 0.3s ease",
+                      }}
+                    />
                   </div>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 12,
+                      color: "var(--muted)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
                     {enrichProgress.done} / {enrichProgress.total}
                   </span>
                 </div>
               )}
-
               {bulkRunning ? (
                 <button
                   onClick={cancelEnrich}
                   style={{
-                    background: 'var(--surface2)', border: '1px solid var(--border)',
-                    color: 'var(--red)', borderRadius: 7, padding: '7px 14px',
-                    fontSize: 13, cursor: 'pointer',
+                    background: "var(--surface2)",
+                    border: "1px solid var(--border)",
+                    color: "var(--red)",
+                    borderRadius: 7,
+                    padding: "7px 14px",
+                    fontSize: 13,
+                    cursor: "pointer",
                   }}
                 >
                   Cancel
@@ -465,11 +613,17 @@ export default function Home() {
                   onClick={enrichAll}
                   disabled={!leads.length}
                   style={{
-                    background: 'var(--green)', color: '#0a0a0b',
-                    fontWeight: 600, fontSize: 13, padding: '8px 16px',
-                    borderRadius: 7, cursor: leads.length ? 'pointer' : 'not-allowed',
+                    background: "var(--green)",
+                    color: "#0a0a0b",
+                    fontWeight: 600,
+                    fontSize: 13,
+                    padding: "8px 16px",
+                    borderRadius: 7,
+                    cursor: leads.length ? "pointer" : "not-allowed",
                     opacity: leads.length ? 1 : 0.4,
-                    display: 'flex', alignItems: 'center', gap: 7,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 7,
                   }}
                 >
                   ✦ Enrich all leads
@@ -480,112 +634,182 @@ export default function Home() {
         )}
 
         {/* ── Toolbar ── */}
-        <div style={{
-          display: 'flex', gap: 8, marginBottom: 12,
-          alignItems: 'stretch', flexWrap: 'wrap',
-        }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            marginBottom: 12,
+            alignItems: "stretch",
+            flexWrap: "wrap",
+          }}
+        >
           <input
             type="text"
-            placeholder={leads.length ? `Search ${leads.length.toLocaleString()} leads…` : 'Search leads…'}
+            placeholder={
+              leads.length
+                ? `Search ${leads.length.toLocaleString()} leads…`
+                : "Search leads…"
+            }
             value={search}
-            onChange={e => { setSearch(e.target.value); setPage(1); }}
-            style={{ flex: '1 1 260px', fontSize: 14, padding: '9px 14px' }}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(1);
+            }}
+            style={{ flex: "1 1 260px", fontSize: 14, padding: "9px 14px" }}
           />
           <select
             value={filterState}
-            onChange={e => { setFilterState(e.target.value); setPage(1); }}
+            onChange={(e) => {
+              setFilterState(e.target.value);
+              setPage(1);
+            }}
             disabled={!leads.length}
           >
             <option value="">All states</option>
-            {stats?.states.map(s => <option key={s} value={s}>{s}</option>)}
+            {stats?.states.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
           </select>
           <select
             value={filterCategory}
-            onChange={e => { setFilterCategory(e.target.value); setPage(1); }}
+            onChange={(e) => {
+              setFilterCategory(e.target.value);
+              setPage(1);
+            }}
             disabled={!leads.length}
           >
             <option value="">All categories</option>
-            {ALL_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+            {ALL_CATEGORIES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
           </select>
-
-          {/* Hide excluded toggle */}
           {leads.length > 0 && (
             <button
-              onClick={() => { setHideExcluded(h => !h); setPage(1); }}
+              onClick={() => {
+                setHideExcluded((h) => !h);
+                setPage(1);
+              }}
               style={{
-                background: hideExcluded ? 'var(--surface2)' : 'transparent',
-                border: `1px solid ${hideExcluded ? 'var(--border2)' : 'var(--border)'}`,
-                color: hideExcluded ? 'var(--text)' : 'var(--muted)',
-                borderRadius: 6, padding: '9px 14px', fontSize: 12,
-                cursor: 'pointer', whiteSpace: 'nowrap',
+                background: hideExcluded ? "var(--surface2)" : "transparent",
+                border: `1px solid ${hideExcluded ? "var(--border2)" : "var(--border)"}`,
+                color: hideExcluded ? "var(--text)" : "var(--muted)",
+                borderRadius: 6,
+                padding: "9px 14px",
+                fontSize: 12,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
               }}
             >
-              {hideExcluded ? '✓ Hiding excluded' : 'Show excluded'}
+              {hideExcluded ? "✓ Hiding excluded" : "Show excluded"}
             </button>
           )}
-
           {hasActiveFilters && (
             <button
-              onClick={() => { setSearch(''); setFilterState(''); setFilterCategory(''); setPage(1); }}
+              onClick={() => {
+                setSearch("");
+                setFilterState("");
+                setFilterCategory("");
+                setPage(1);
+              }}
               style={{
-                background: 'var(--surface2)', border: '1px solid var(--border)',
-                color: 'var(--muted)', borderRadius: 6, padding: '9px 14px', fontSize: 13,
+                background: "var(--surface2)",
+                border: "1px solid var(--border)",
+                color: "var(--muted)",
+                borderRadius: 6,
+                padding: "9px 14px",
+                fontSize: 13,
               }}
             >
               Clear
             </button>
           )}
-
-          <div style={{ width: 1, background: 'var(--border)', margin: '0 4px', alignSelf: 'stretch' }} />
-
+          <div
+            style={{
+              width: 1,
+              background: "var(--border)",
+              margin: "0 4px",
+              alignSelf: "stretch",
+            }}
+          />
           <button
             onClick={() => fileInputRef.current?.click()}
             style={{
-              background: 'var(--surface2)', border: '1px solid var(--border)',
-              color: 'var(--text)', borderRadius: 6, padding: '9px 16px', fontSize: 13,
-              display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap',
+              background: "var(--surface2)",
+              border: "1px solid var(--border)",
+              color: "var(--text)",
+              borderRadius: 6,
+              padding: "9px 16px",
+              fontSize: 13,
+              display: "flex",
+              alignItems: "center",
+              gap: 7,
+              whiteSpace: "nowrap",
             }}
           >
-            ↑ {loadedFiles.length ? 'Add more CSVs' : 'Upload CSVs'}
+            ↑ Add more CSVs
           </button>
           <input
             ref={fileInputRef}
             type="file"
             accept=".csv"
             multiple
-            style={{ display: 'none' }}
-            onChange={e => handleFiles(e.target.files)}
+            style={{ display: "none" }}
+            onChange={(e) => handleFiles(e.target.files)}
           />
         </div>
 
-        {/* ── File summary ── */}
-        {loadedFiles.length > 0 && (
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            background: 'var(--surface)', border: '1px solid var(--border)',
-            borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 13,
-          }}>
-            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
-              <span style={{ color: 'var(--muted)' }}>
-                <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)', marginRight: 5 }}>
+        {/* ── File summary (only shows when extra files added) ── */}
+        {loadedFiles.length > 1 && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              marginBottom: 16,
+              fontSize: 13,
+            }}
+          >
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+              <span style={{ color: "var(--muted)" }}>
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--text)",
+                    marginRight: 5,
+                  }}
+                >
                   {loadedFiles.length}
                 </span>
                 files loaded
               </span>
-              <span style={{ color: 'var(--muted)' }}>
-                <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)', marginRight: 5 }}>
-                  {stats?.totalRows.toLocaleString()}
-                </span>
-                rows imported
-              </span>
-              <span style={{ color: 'var(--muted)' }}>
-                <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--green)', marginRight: 5 }}>
+              <span style={{ color: "var(--muted)" }}>
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--green)",
+                    marginRight: 5,
+                  }}
+                >
                   {stats?.unique.toLocaleString()}
                 </span>
                 unique leads
               </span>
               {isProcessing && (
-                <span style={{ color: 'var(--amber)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                <span
+                  style={{
+                    color: "var(--amber)",
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 12,
+                  }}
+                >
                   Processing…
                 </span>
               )}
@@ -593,80 +817,72 @@ export default function Home() {
             <button
               onClick={clearAll}
               style={{
-                background: 'none', border: 'none', color: 'var(--muted)',
-                fontSize: 12, cursor: 'pointer', padding: '2px 6px', borderRadius: 4,
+                background: "none",
+                border: "none",
+                color: "var(--muted)",
+                fontSize: 12,
+                cursor: "pointer",
+                padding: "2px 6px",
+                borderRadius: 4,
               }}
-              onMouseOver={e => e.target.style.color = 'var(--red)'}
-              onMouseOut={e => e.target.style.color = 'var(--muted)'}
+              onMouseOver={(e) => (e.target.style.color = "var(--red)")}
+              onMouseOut={(e) => (e.target.style.color = "var(--muted)")}
             >
               Clear all
             </button>
           </div>
         )}
 
-        {/* ── Drop zone (shown only when no files) ── */}
-        {loadedFiles.length === 0 && (
-          <div
-            className={`drop-zone ${isDragging ? 'dragging' : ''}`}
-            style={{ padding: '48px 24px', textAlign: 'center', marginBottom: 20 }}
-            onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={onDrop}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <div style={{ fontSize: 28, marginBottom: 10, color: 'var(--muted)' }}>↑</div>
-            <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
-              Drag & drop your Apify CSV exports here
-            </div>
-            <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-              Drop all files at once — duplicates removed automatically
-            </div>
-          </div>
-        )}
-
         {/* ── Table ── */}
         {leads.length > 0 && (
           <>
-            <div style={{
-              border: '1px solid var(--border)', borderRadius: 10,
-              overflow: 'hidden', overflowX: 'auto',
-            }}>
+            <div
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                overflow: "hidden",
+                overflowX: "auto",
+              }}
+            >
               <table>
                 <colgroup>
-                  <col style={{ width: '18%' }} />
-                  <col style={{ width: '10%' }} />
-                  <col style={{ width: '8%'  }} />
-                  <col style={{ width: '5%'  }} />
-                  <col style={{ width: '5%'  }} />
-                  <col style={{ width: '13%' }} />
-                  <col style={{ width: '13%' }} />
-                  <col style={{ width: '14%' }} />
-                  <col style={{ width: '12%' }} />
-                  <col style={{ width: '5%'  }} />
+                  <col style={{ width: "18%" }} />
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "8%" }} />
+                  <col style={{ width: "5%" }} />
+                  <col style={{ width: "5%" }} />
+                  <col style={{ width: "13%" }} />
+                  <col style={{ width: "13%" }} />
+                  <col style={{ width: "14%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "5%" }} />
                 </colgroup>
                 <thead>
                   <tr>
                     {[
-                      ['title',        'Business name'],
-                      ['phone',        'Phone'],
-                      ['city',         'City'],
-                      ['state',        'State'],
-                      ['totalScore',   'Rating'],
-                      ['_category',    'Category'],
-                      ['website',      'Website'],
-                      ['emails',       'Email'],
-                      ['founder_name', 'Founder'],
+                      ["title", "Business name"],
+                      ["phone", "Phone"],
+                      ["city", "City"],
+                      ["state", "State"],
+                      ["totalScore", "Rating"],
+                      ["_category", "Category"],
+                      ["website", "Website"],
+                      ["emails", "Email"],
+                      ["founder_name", "Founder"],
                     ].map(([col, label]) => (
                       <th
                         key={col}
                         onClick={() => handleSort(col)}
-                        style={{ cursor: 'pointer', userSelect: 'none' }}
+                        style={{ cursor: "pointer", userSelect: "none" }}
                       >
                         {label}
-                        {sortCol === col
-                          ? <span style={{ marginLeft: 4, opacity: 0.7 }}>{sortDir === 1 ? '↑' : '↓'}</span>
-                          : <span style={{ marginLeft: 4, opacity: 0.2 }}>↕</span>
-                        }
+                        {sortCol === col ? (
+                          <span style={{ marginLeft: 4, opacity: 0.7 }}>
+                            {sortDir === 1 ? "↑" : "↓"}
+                          </span>
+                        ) : (
+                          <span style={{ marginLeft: 4, opacity: 0.2 }}>↕</span>
+                        )}
                       </th>
                     ))}
                     <th>Enrich</th>
@@ -675,63 +891,119 @@ export default function Home() {
                 <tbody>
                   {paginated.map((lead, i) => {
                     const isEnriching = !!enriching[lead.title];
-                    const isExcluded  = lead._category === 'EXCLUDED';
+                    const isExcluded = lead._category === "EXCLUDED";
                     return (
-                      <tr key={i} className={isExcluded ? 'excluded' : ''}>
-                        <td title={lead.title} style={{ fontWeight: 500 }}>{lead.title}</td>
-                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                          {lead.phone || '—'}
+                      <tr key={i} className={isExcluded ? "excluded" : ""}>
+                        <td title={lead.title} style={{ fontWeight: 500 }}>
+                          {lead.title}
                         </td>
-                        <td>{lead.city || '—'}</td>
-                        <td>{lead.state || '—'}</td>
-                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                          {lead.totalScore || '—'}
+                        <td
+                          style={{
+                            fontFamily: "var(--font-mono)",
+                            fontSize: 11,
+                          }}
+                        >
+                          {lead.phone || "—"}
                         </td>
-                        <td><Badge category={lead._category} /></td>
+                        <td>{lead.city || "—"}</td>
+                        <td>{lead.state || "—"}</td>
+                        <td
+                          style={{
+                            fontFamily: "var(--font-mono)",
+                            fontSize: 11,
+                          }}
+                        >
+                          {lead.totalScore || "—"}
+                        </td>
+                        <td>
+                          <Badge category={lead._category} />
+                        </td>
                         <td>
                           {lead.website ? (
                             <a
-                              href={lead.website.startsWith('http') ? lead.website : `https://${lead.website}`}
+                              href={
+                                lead.website.startsWith("http")
+                                  ? lead.website
+                                  : `https://${lead.website}`
+                              }
                               target="_blank"
                               rel="noopener noreferrer"
-                              style={{ color: 'var(--blue)', textDecoration: 'none', fontSize: 12 }}
+                              style={{
+                                color: "var(--blue)",
+                                textDecoration: "none",
+                                fontSize: 12,
+                              }}
                             >
-                              {lead.website.replace(/^https?:\/\/(www\.)?/, '').split('/')[0]}
+                              {
+                                lead.website
+                                  .replace(/^https?:\/\/(www\.)?/, "")
+                                  .split("/")[0]
+                              }
                             </a>
-                          ) : '—'}
+                          ) : (
+                            "—"
+                          )}
                         </td>
-                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                          {lead.emails
-                            ? <span style={{ color: 'var(--green)' }}>{lead.emails.split(',')[0].trim()}</span>
-                            : <span style={{ color: 'var(--muted)' }}>—</span>
-                          }
+                        <td
+                          style={{
+                            fontFamily: "var(--font-mono)",
+                            fontSize: 11,
+                          }}
+                        >
+                          {lead.emails ? (
+                            <span style={{ color: "var(--green)" }}>
+                              {lead.emails.split(",")[0].trim()}
+                            </span>
+                          ) : (
+                            <span style={{ color: "var(--muted)" }}>—</span>
+                          )}
                         </td>
                         <td style={{ fontSize: 12 }}>
-                          {lead.founder_name
-                            ? <span style={{ color: 'var(--text)' }}>{lead.founder_name}</span>
-                            : <span style={{ color: 'var(--muted)' }}>—</span>
-                          }
+                          {lead.founder_name ? (
+                            <span style={{ color: "var(--text)" }}>
+                              {lead.founder_name}
+                            </span>
+                          ) : (
+                            <span style={{ color: "var(--muted)" }}>—</span>
+                          )}
                         </td>
                         <td>
-                          {isExcluded ? null : (
+                          {!isExcluded && (
                             <button
                               onClick={() => enrichOne(lead)}
                               disabled={isEnriching || !lead.website}
-                              title={!lead.website ? 'No website' : 'Enrich with AI'}
+                              title={
+                                !lead.website ? "No website" : "Enrich with AI"
+                              }
                               style={{
-                                background: 'none',
-                                border: '1px solid var(--border)',
-                                color: isEnriching ? 'var(--green)' : 'var(--muted)',
-                                borderRadius: 5, padding: '4px 8px', fontSize: 11,
-                                cursor: lead.website ? 'pointer' : 'not-allowed',
+                                background: "none",
+                                border: "1px solid var(--border)",
+                                color: isEnriching
+                                  ? "var(--green)"
+                                  : "var(--muted)",
+                                borderRadius: 5,
+                                padding: "4px 8px",
+                                fontSize: 11,
+                                cursor: lead.website
+                                  ? "pointer"
+                                  : "not-allowed",
                                 opacity: lead.website ? 1 : 0.3,
-                                display: 'flex', alignItems: 'center', gap: 4,
-                                transition: 'all 0.15s',
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 4,
+                                transition: "all 0.15s",
                               }}
-                              onMouseOver={e => { if (lead.website && !isEnriching) e.currentTarget.style.borderColor = 'var(--green)'; }}
-                              onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border)'; }}
+                              onMouseOver={(e) => {
+                                if (lead.website && !isEnriching)
+                                  e.currentTarget.style.borderColor =
+                                    "var(--green)";
+                              }}
+                              onMouseOut={(e) => {
+                                e.currentTarget.style.borderColor =
+                                  "var(--border)";
+                              }}
                             >
-                              {isEnriching ? <Spinner /> : '✦'}
+                              {isEnriching ? <Spinner /> : "✦"}
                             </button>
                           )}
                         </td>
@@ -743,50 +1015,61 @@ export default function Home() {
             </div>
 
             {/* ── Pagination ── */}
-            <div style={{
-              display: 'flex', alignItems: 'center',
-              justifyContent: 'space-between', marginTop: 16,
-            }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' }}>
-                {filtered.length.toLocaleString()} leads · page {page} of {totalPages}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginTop: 16,
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  color: "var(--muted)",
+                }}
+              >
+                {filtered.length.toLocaleString()} leads · page {page} of{" "}
+                {totalPages}
               </span>
-              <div style={{ display: 'flex', gap: 6 }}>
+              <div style={{ display: "flex", gap: 6 }}>
                 <button
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page === 1}
                   style={{
-                    background: 'var(--surface2)', border: '1px solid var(--border)',
-                    color: page === 1 ? 'var(--muted)' : 'var(--text)',
-                    borderRadius: 6, padding: '6px 14px', fontSize: 12,
+                    background: "var(--surface2)",
+                    border: "1px solid var(--border)",
+                    color: page === 1 ? "var(--muted)" : "var(--text)",
+                    borderRadius: 6,
+                    padding: "6px 14px",
+                    fontSize: 12,
                     opacity: page === 1 ? 0.4 : 1,
-                    cursor: page === 1 ? 'not-allowed' : 'pointer',
+                    cursor: page === 1 ? "not-allowed" : "pointer",
                   }}
-                >← Prev</button>
+                >
+                  ← Prev
+                </button>
                 <button
-                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page === totalPages}
                   style={{
-                    background: 'var(--surface2)', border: '1px solid var(--border)',
-                    color: page === totalPages ? 'var(--muted)' : 'var(--text)',
-                    borderRadius: 6, padding: '6px 14px', fontSize: 12,
+                    background: "var(--surface2)",
+                    border: "1px solid var(--border)",
+                    color: page === totalPages ? "var(--muted)" : "var(--text)",
+                    borderRadius: 6,
+                    padding: "6px 14px",
+                    fontSize: 12,
                     opacity: page === totalPages ? 0.4 : 1,
-                    cursor: page === totalPages ? 'not-allowed' : 'pointer',
+                    cursor: page === totalPages ? "not-allowed" : "pointer",
                   }}
-                >Next →</button>
+                >
+                  Next →
+                </button>
               </div>
             </div>
           </>
         )}
-
-        {/* ── Empty state ── */}
-        {!leads.length && !isProcessing && loadedFiles.length === 0 && (
-          <div style={{ textAlign: 'center', padding: '80px 0', color: 'var(--muted)' }}>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 40, marginBottom: 14, opacity: 0.3 }}>∅</div>
-            <div style={{ fontSize: 15, marginBottom: 6, color: 'var(--text)' }}>No leads loaded yet</div>
-            <div style={{ fontSize: 13 }}>Upload your Apify CSV exports using the button above</div>
-          </div>
-        )}
-
       </div>
     </>
   );
