@@ -5,6 +5,8 @@ import Papa from 'papaparse';
 import { processFiles, filterLeads, leadsToCSV } from '@/lib/processor';
 
 const PAGE_SIZE = 30;
+const BATCH_SIZE = 5;      // concurrent enrichment requests
+const BATCH_DELAY = 1200;   // ms between batches
 
 const CAT_BADGE = {
   'Investment BA':    'badge-investment',
@@ -23,7 +25,11 @@ const ALL_CATEGORIES = [
   'Uncategorised', 'EXCLUDED',
 ];
 
-// ── Small components ──────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
 function StatCard({ label, value, color }) {
   const colorMap = {
@@ -51,28 +57,48 @@ function Badge({ category }) {
   );
 }
 
+// Spinner SVG
+function Spinner() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" style={{ animation: 'spin 0.8s linear infinite' }}>
+      <circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="14 8" />
+    </svg>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Home() {
-  const [leads, setLeads]             = useState([]);
-  const [stats, setStats]             = useState(null);
-  const [loadedFiles, setLoadedFiles] = useState([]);
-  const [isDragging, setIsDragging]   = useState(false);
+  const [leads, setLeads]               = useState([]);
+  const [stats, setStats]               = useState(null);
+  const [loadedFiles, setLoadedFiles]   = useState([]);
+  const [isDragging, setIsDragging]     = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [search, setSearch]           = useState('');
-  const [filterState, setFilterState] = useState('');
+
+  // Filters
+  const [search, setSearch]               = useState('');
+  const [filterState, setFilterState]     = useState('');
   const [filterCategory, setFilterCategory] = useState('');
-  const [page, setPage]               = useState(1);
-  const [sortCol, setSortCol]         = useState(null);
-  const [sortDir, setSortDir]         = useState(1);
+  const [hideExcluded, setHideExcluded]   = useState(true);
+
+  // Table
+  const [page, setPage]     = useState(1);
+  const [sortCol, setSortCol] = useState(null);
+  const [sortDir, setSortDir] = useState(1);
+
+  // Enrichment state
+  const [enriching, setEnriching]         = useState({}); // { [key]: true } rows in flight
+  const [enrichProgress, setEnrichProgress] = useState(null); // { done, total }
+  const [bulkRunning, setBulkRunning]     = useState(false);
+  const cancelRef = useRef(false);
+
   const fileInputRef = useRef(null);
 
-  // ── File handling ───────────────────────────────────────────────────────────
+  // ── File handling ─────────────────────────────────────────────────────────
 
   const handleFiles = useCallback((newFiles) => {
     const csvFiles = [...newFiles].filter(f => f.name.toLowerCase().endsWith('.csv'));
     if (!csvFiles.length) return;
-
     setIsProcessing(true);
 
     const parsed = [];
@@ -102,10 +128,7 @@ export default function Home() {
             });
           }
         },
-        error: () => {
-          remaining--;
-          if (remaining === 0) setIsProcessing(false);
-        },
+        error: () => { remaining--; if (remaining === 0) setIsProcessing(false); },
       });
     });
   }, []);
@@ -124,13 +147,149 @@ export default function Home() {
     setFilterState('');
     setFilterCategory('');
     setPage(1);
+    setEnriching({});
+    setEnrichProgress(null);
+    setBulkRunning(false);
   }, []);
 
-  // ── Filtering & sorting ─────────────────────────────────────────────────────
+  // ── Single-row enrichment ─────────────────────────────────────────────────
+
+  const enrichOne = useCallback(async (lead) => {
+    const key = lead.title;
+    if (!lead.website) return;
+
+    setEnriching(prev => ({ ...prev, [key]: true }));
+
+    try {
+      const res = await fetch('/api/enrich', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          website:       lead.website,
+          businessName:  lead.title,
+          existingEmail: lead.emails || '',
+        }),
+      });
+
+      if (!res.ok) throw new Error('API error');
+      const data = await res.json();
+
+      setLeads(prev => prev.map(l => {
+        if (l.title !== key) return l;
+        return {
+          ...l,
+          founder_name: data.founder_name || l.founder_name || '',
+          job_title:    data.job_title    || l.job_title    || '',
+          emails:       data.email        || l.emails       || '',
+          _enriched:    true,
+        };
+      }));
+    } catch (err) {
+      console.error('Enrich failed for', key, err);
+    }
+
+    setEnriching(prev => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
+  // ── Bulk enrichment ───────────────────────────────────────────────────────
+
+  const enrichAll = useCallback(async () => {
+    // Only enrich leads that have a website and aren't EXCLUDED
+    const toEnrich = leads.filter(l =>
+      l.website && l._category !== 'EXCLUDED'
+    );
+
+    if (!toEnrich.length) return;
+
+    cancelRef.current = false;
+    setBulkRunning(true);
+    setEnrichProgress({ done: 0, total: toEnrich.length });
+
+    let done = 0;
+
+    // Process in batches of BATCH_SIZE
+    for (let i = 0; i < toEnrich.length; i += BATCH_SIZE) {
+      if (cancelRef.current) break;
+
+      const batch = toEnrich.slice(i, i + BATCH_SIZE);
+
+      await Promise.all(batch.map(async (lead) => {
+        if (cancelRef.current) return;
+        const key = lead.title;
+
+        setEnriching(prev => ({ ...prev, [key]: true }));
+
+        try {
+          const res = await fetch('/api/enrich', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              website:       lead.website,
+              businessName:  lead.title,
+              existingEmail: lead.emails || '',
+            }),
+          });
+
+          if (!res.ok) throw new Error();
+          const data = await res.json();
+
+          setLeads(prev => prev.map(l => {
+            if (l.title !== key) return l;
+            return {
+              ...l,
+              founder_name: data.founder_name || l.founder_name || '',
+              job_title:    data.job_title    || l.job_title    || '',
+              emails:       data.email        || l.emails       || '',
+              _enriched:    true,
+            };
+          }));
+        } catch {
+          // Silent fail — row just stays as-is
+        }
+
+        setEnriching(prev => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+
+        done++;
+        setEnrichProgress({ done, total: toEnrich.length });
+      }));
+
+      // Pause between batches to respect rate limits
+      if (i + BATCH_SIZE < toEnrich.length) {
+        await sleep(BATCH_DELAY);
+      }
+    }
+
+    setBulkRunning(false);
+    setEnrichProgress(null);
+    cancelRef.current = false;
+  }, [leads]);
+
+  const cancelEnrich = useCallback(() => {
+    cancelRef.current = true;
+    setBulkRunning(false);
+    setEnrichProgress(null);
+    setEnriching({});
+  }, []);
+
+  // ── Filtering & sorting ───────────────────────────────────────────────────
 
   let filtered = filterLeads(leads, {
-    search, state: filterState, category: filterCategory,
+    search,
+    state:    filterState,
+    category: filterCategory,
   });
+
+  if (hideExcluded) {
+    filtered = filtered.filter(l => l._category !== 'EXCLUDED');
+  }
 
   if (sortCol) {
     filtered = [...filtered].sort((a, b) => {
@@ -151,7 +310,12 @@ export default function Home() {
     setPage(1);
   };
 
-  // ── Export ──────────────────────────────────────────────────────────────────
+  // ── Enrichment stats ──────────────────────────────────────────────────────
+  const enrichedCount  = leads.filter(l => l._enriched).length;
+  const hasEmailCount  = leads.filter(l => l.emails && l.emails.trim()).length;
+  const hasNameCount   = leads.filter(l => l.founder_name && l.founder_name.trim()).length;
+
+  // ── Export ────────────────────────────────────────────────────────────────
 
   const handleExport = () => {
     const csv  = leadsToCSV(filtered);
@@ -164,353 +328,466 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  // ── Render ──────────────────────────────────────────────────────────────────
-
   const hasActiveFilters = search || filterState || filterCategory;
 
+  // ── Render ────────────────────────────────────────────────────────────────
+
   return (
-    <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 24px 80px' }}>
+    <>
+      {/* Spinner keyframe */}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
-      {/* ── Header ── */}
-      <header style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '28px 0 24px', borderBottom: '1px solid var(--border)', marginBottom: 28,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{
-            width: 30, height: 30, borderRadius: 7,
-            background: 'var(--green)', display: 'flex',
-            alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-          }}>
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M2 7h10M7 2l5 5-5 5" stroke="#0a0a0b" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </div>
-          <div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--green)', letterSpacing: '0.06em', marginBottom: 2, cursor: 'default' }}>
-              LEAD SCRAPER
-            </div>
-            <h1 style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', lineHeight: 1, cursor: 'default' }}>
-              Buyers Agent Australia
-            </h1>
-          </div>
-        </div>
+      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 24px 80px' }}>
 
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {stats && (
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' }}>
-              {filtered.length.toLocaleString()} leads
-            </span>
-          )}
-          <button
-            onClick={handleExport}
-            disabled={!filtered.length}
-            style={{
-              background: filtered.length ? 'var(--green)' : 'var(--surface2)',
-              color: filtered.length ? '#0a0a0b' : 'var(--muted)',
-              fontWeight: 600, fontSize: 13, padding: '8px 18px',
-              borderRadius: 8, transition: 'opacity 0.15s',
-              opacity: filtered.length ? 1 : 0.4,
-              cursor: filtered.length ? 'pointer' : 'not-allowed',
-            }}
-          >
-            Export CSV
-          </button>
-        </div>
-      </header>
-
-      {/* ── Stats row ── */}
-      {stats && (
-        <div style={{
-          display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)',
-          gap: 10, marginBottom: 24,
-        }}>
-          <StatCard label="Imported"      value={stats.totalRows}    />
-          <StatCard label="Dupes removed" value={stats.dupes}        color="amber" />
-          <StatCard label="Unique leads"  value={stats.unique}       color="green" />
-          <StatCard label="Categorised"   value={stats.categorised}  color="blue"  />
-          <StatCard label="Uncategorised" value={stats.unknown}      color="amber" />
-          <StatCard label="Excluded"      value={stats.excluded}     color="red"   />
-        </div>
-      )}
-
-      {/* ── Search + filters + upload (one cohesive toolbar) ── */}
-      <div style={{
-        display: 'flex', gap: 8, marginBottom: 16,
-        alignItems: 'stretch', flexWrap: 'wrap',
-      }}>
-        {/* Search — most prominent */}
-        <input
-          type="text"
-          placeholder={leads.length ? `Search ${leads.length.toLocaleString()} leads…` : 'Search leads…'}
-          value={search}
-          onChange={e => { setSearch(e.target.value); setPage(1); }}
-          style={{ flex: '1 1 260px', fontSize: 14, padding: '9px 14px' }}
-        />
-
-        {/* State filter */}
-        <select
-          value={filterState}
-          onChange={e => { setFilterState(e.target.value); setPage(1); }}
-          style={{ flex: '0 0 auto' }}
-          disabled={!leads.length}
-        >
-          <option value="">All states</option>
-          {stats?.states.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
-
-        {/* Category filter */}
-        <select
-          value={filterCategory}
-          onChange={e => { setFilterCategory(e.target.value); setPage(1); }}
-          style={{ flex: '0 0 auto' }}
-          disabled={!leads.length}
-        >
-          <option value="">All categories</option>
-          {ALL_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-
-        {/* Clear filters */}
-        {hasActiveFilters && (
-          <button
-            onClick={() => { setSearch(''); setFilterState(''); setFilterCategory(''); setPage(1); }}
-            style={{
-              background: 'var(--surface2)', border: '1px solid var(--border)',
-              color: 'var(--muted)', borderRadius: 6, padding: '9px 14px', fontSize: 13,
-            }}
-          >
-            Clear
-          </button>
-        )}
-
-        {/* Divider */}
-        <div style={{ width: 1, background: 'var(--border)', margin: '0 4px', alignSelf: 'stretch' }} />
-
-        {/* Upload button */}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          style={{
-            background: 'var(--surface2)', border: '1px solid var(--border)',
-            color: 'var(--text)', borderRadius: 6, padding: '9px 16px', fontSize: 13,
-            display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap',
-          }}
-        >
-          <span style={{ fontSize: 16, lineHeight: 1 }}>↑</span>
-          {loadedFiles.length ? 'Add more CSVs' : 'Upload CSVs'}
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".csv"
-          multiple
-          style={{ display: 'none' }}
-          onChange={e => handleFiles(e.target.files)}
-        />
-      </div>
-
-      {/* ── File summary (replaces chip list) ── */}
-      {loadedFiles.length > 0 && (
-        <div style={{
+        {/* ── Header ── */}
+        <header style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          background: 'var(--surface)', border: '1px solid var(--border)',
-          borderRadius: 8, padding: '10px 14px', marginBottom: 16,
-          fontSize: 13,
+          padding: '28px 0 24px', borderBottom: '1px solid var(--border)', marginBottom: 28,
         }}>
-          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
-            <span style={{ color: 'var(--muted)' }}>
-              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)', marginRight: 5 }}>
-                {loadedFiles.length}
-              </span>
-              files loaded
-            </span>
-            <span style={{ color: 'var(--muted)' }}>
-              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)', marginRight: 5 }}>
-                {stats?.totalRows.toLocaleString()}
-              </span>
-              rows imported
-            </span>
-            <span style={{ color: 'var(--muted)' }}>
-              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--green)', marginRight: 5 }}>
-                {stats?.unique.toLocaleString()}
-              </span>
-              unique leads
-            </span>
-            {isProcessing && (
-              <span style={{ color: 'var(--amber)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                Processing…
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{
+              width: 30, height: 30, borderRadius: 7,
+              background: 'var(--green)', display: 'flex',
+              alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+            }}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path d="M2 7h10M7 2l5 5-5 5" stroke="#0a0a0b" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+            <div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--green)', letterSpacing: '0.06em', marginBottom: 2 }}>
+                LEAD SCRAPER
+              </div>
+              <h1 style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', lineHeight: 1 }}>
+                Buyers Agent Australia
+              </h1>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {leads.length > 0 && (
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' }}>
+                {filtered.length.toLocaleString()} leads
               </span>
             )}
+            <button
+              onClick={handleExport}
+              disabled={!filtered.length}
+              style={{
+                background: filtered.length ? 'var(--green)' : 'var(--surface2)',
+                color: filtered.length ? '#0a0a0b' : 'var(--muted)',
+                fontWeight: 600, fontSize: 13, padding: '8px 18px',
+                borderRadius: 8, transition: 'opacity 0.15s',
+                opacity: filtered.length ? 1 : 0.4,
+                cursor: filtered.length ? 'pointer' : 'not-allowed',
+              }}
+            >
+              Export CSV
+            </button>
           </div>
-          <button
-            onClick={clearAll}
-            style={{
-              background: 'none', border: 'none', color: 'var(--muted)',
-              fontSize: 12, cursor: 'pointer', padding: '2px 6px',
-              borderRadius: 4, transition: 'color 0.1s',
-            }}
-            onMouseOver={e => e.target.style.color = 'var(--red)'}
-            onMouseOut={e => e.target.style.color = 'var(--muted)'}
-          >
-            Clear all
-          </button>
-        </div>
-      )}
+        </header>
 
-      {/* ── Drop zone (only shown when no files loaded) ── */}
-      {loadedFiles.length === 0 && (
-        <div
-          className={`drop-zone ${isDragging ? 'dragging' : ''}`}
-          style={{ padding: '48px 24px', textAlign: 'center', marginBottom: 20 }}
-          onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={onDrop}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <div style={{ fontSize: 28, marginBottom: 10, color: 'var(--muted)' }}>↑</div>
-          <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
-            Drag & drop your Apify CSV exports here
-          </div>
-          <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-            Drop all 80 files at once — duplicates removed automatically
-          </div>
-        </div>
-      )}
-
-      {/* ── Table ── */}
-      {leads.length > 0 && (
-        <>
+        {/* ── Stats ── */}
+        {stats && (
           <div style={{
-            border: '1px solid var(--border)', borderRadius: 10,
-            overflow: 'hidden', overflowX: 'auto',
+            display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)',
+            gap: 10, marginBottom: 24,
           }}>
-            <table>
-              <colgroup>
-                <col style={{ width: '22%' }} />
-                <col style={{ width: '11%' }} />
-                <col style={{ width: '9%'  }} />
-                <col style={{ width: '6%'  }} />
-                <col style={{ width: '5%'  }} />
-                <col style={{ width: '14%' }} />
-                <col style={{ width: '16%' }} />
-                <col style={{ width: '17%' }} />
-              </colgroup>
-              <thead>
-                <tr>
-                  {[
-                    ['title',        'Business name'],
-                    ['phone',        'Phone'],
-                    ['city',         'City'],
-                    ['state',        'State'],
-                    ['totalScore',   'Rating'],
-                    ['_category',    'Category'],
-                    ['website',      'Website'],
-                    ['emails',       'Email'],
-                  ].map(([col, label]) => (
-                    <th
-                      key={col}
-                      onClick={() => handleSort(col)}
-                      style={{ cursor: 'pointer', userSelect: 'none' }}
-                    >
-                      {label}
-                      {sortCol === col
-                        ? <span style={{ marginLeft: 4, opacity: 0.7 }}>{sortDir === 1 ? '↑' : '↓'}</span>
-                        : <span style={{ marginLeft: 4, opacity: 0.2 }}>↕</span>
-                      }
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {paginated.map((lead, i) => (
-                  <tr key={i} className={lead._category === 'EXCLUDED' ? 'excluded' : ''}>
-                    <td title={lead.title} style={{ fontWeight: 500 }}>{lead.title}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                      {lead.phone || '—'}
-                    </td>
-                    <td>{lead.city || '—'}</td>
-                    <td>{lead.state || '—'}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                      {lead.totalScore || '—'}
-                    </td>
-                    <td><Badge category={lead._category} /></td>
-                    <td>
-                      {lead.website ? (
-                        <a
-                          href={lead.website.startsWith('http') ? lead.website : `https://${lead.website}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: 'var(--blue)', textDecoration: 'none', fontSize: 12 }}
-                        >
-                          {lead.website.replace(/^https?:\/\/(www\.)?/, '').split('/')[0]}
-                        </a>
-                      ) : '—'}
-                    </td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                      {lead.emails
-                        ? <span style={{ color: 'var(--green)' }}>{lead.emails.split(',')[0].trim()}</span>
-                        : <span style={{ color: 'var(--muted)' }}>—</span>
-                      }
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <StatCard label="Imported"      value={stats.totalRows}   />
+            <StatCard label="Dupes removed" value={stats.dupes}       color="amber" />
+            <StatCard label="Unique leads"  value={stats.unique}      color="green" />
+            <StatCard label="Categorised"   value={stats.categorised} color="blue"  />
+            <StatCard label="With email"    value={hasEmailCount}     color="green" />
+            <StatCard label="With name"     value={hasNameCount}      color="blue"  />
           </div>
+        )}
 
-          {/* ── Pagination ── */}
+        {/* ── Enrichment bar ── */}
+        {leads.length > 0 && (
           <div style={{
-            display: 'flex', alignItems: 'center',
-            justifyContent: 'space-between', marginTop: 16,
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            borderRadius: 10, padding: '14px 18px', marginBottom: 16,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: 16, flexWrap: 'wrap',
           }}>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' }}>
-              {filtered.length.toLocaleString()} leads · page {page} of {totalPages}
-            </span>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                onClick={() => setPage(p => Math.max(1, p - 1))}
-                disabled={page === 1}
-                style={{
-                  background: 'var(--surface2)', border: '1px solid var(--border)',
-                  color: page === 1 ? 'var(--muted)' : 'var(--text)',
-                  borderRadius: 6, padding: '6px 14px', fontSize: 12,
-                  opacity: page === 1 ? 0.4 : 1, cursor: page === 1 ? 'not-allowed' : 'pointer',
-                }}
-              >
-                ← Prev
-              </button>
-              <button
-                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                disabled={page === totalPages}
-                style={{
-                  background: 'var(--surface2)', border: '1px solid var(--border)',
-                  color: page === totalPages ? 'var(--muted)' : 'var(--text)',
-                  borderRadius: 6, padding: '6px 14px', fontSize: 12,
-                  opacity: page === totalPages ? 0.4 : 1,
-                  cursor: page === totalPages ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Next →
-              </button>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 3 }}>
+                AI Enrichment
+                <span style={{
+                  fontFamily: 'var(--font-mono)', fontSize: 11,
+                  color: 'var(--muted)', marginLeft: 10,
+                }}>
+                  gpt-4o-mini
+                </span>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                {enrichedCount > 0
+                  ? `${enrichedCount.toLocaleString()} leads enriched this session`
+                  : 'Extract founder names and emails using AI — runs on each website automatically'
+                }
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              {/* Progress indicator */}
+              {enrichProgress && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  {/* Progress bar */}
+                  <div style={{
+                    width: 140, height: 4, background: 'var(--surface2)',
+                    borderRadius: 99, overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      height: '100%', background: 'var(--green)',
+                      width: `${(enrichProgress.done / enrichProgress.total) * 100}%`,
+                      transition: 'width 0.3s ease', borderRadius: 99,
+                    }} />
+                  </div>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                    {enrichProgress.done} / {enrichProgress.total}
+                  </span>
+                </div>
+              )}
+
+              {bulkRunning ? (
+                <button
+                  onClick={cancelEnrich}
+                  style={{
+                    background: 'var(--surface2)', border: '1px solid var(--border)',
+                    color: 'var(--red)', borderRadius: 7, padding: '7px 14px',
+                    fontSize: 13, cursor: 'pointer',
+                  }}
+                >
+                  Cancel
+                </button>
+              ) : (
+                <button
+                  onClick={enrichAll}
+                  disabled={!leads.length}
+                  style={{
+                    background: 'var(--green)', color: '#0a0a0b',
+                    fontWeight: 600, fontSize: 13, padding: '8px 16px',
+                    borderRadius: 7, cursor: leads.length ? 'pointer' : 'not-allowed',
+                    opacity: leads.length ? 1 : 0.4,
+                    display: 'flex', alignItems: 'center', gap: 7,
+                  }}
+                >
+                  ✦ Enrich all leads
+                </button>
+              )}
             </div>
           </div>
-        </>
-      )}
+        )}
 
-      {/* ── Empty state ── */}
-      {!leads.length && !isProcessing && loadedFiles.length === 0 && (
-        <div style={{ textAlign: 'center', padding: '80px 0', color: 'var(--muted)' }}>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 40, marginBottom: 14, opacity: 0.3 }}>
-            ∅
-          </div>
-          <div style={{ fontSize: 15, marginBottom: 6, color: 'var(--text)' }}>
-            No leads loaded yet
-          </div>
-          <div style={{ fontSize: 13 }}>
-            Upload your Apify CSV exports using the button above
-          </div>
+        {/* ── Toolbar ── */}
+        <div style={{
+          display: 'flex', gap: 8, marginBottom: 12,
+          alignItems: 'stretch', flexWrap: 'wrap',
+        }}>
+          <input
+            type="text"
+            placeholder={leads.length ? `Search ${leads.length.toLocaleString()} leads…` : 'Search leads…'}
+            value={search}
+            onChange={e => { setSearch(e.target.value); setPage(1); }}
+            style={{ flex: '1 1 260px', fontSize: 14, padding: '9px 14px' }}
+          />
+          <select
+            value={filterState}
+            onChange={e => { setFilterState(e.target.value); setPage(1); }}
+            disabled={!leads.length}
+          >
+            <option value="">All states</option>
+            {stats?.states.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <select
+            value={filterCategory}
+            onChange={e => { setFilterCategory(e.target.value); setPage(1); }}
+            disabled={!leads.length}
+          >
+            <option value="">All categories</option>
+            {ALL_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+
+          {/* Hide excluded toggle */}
+          {leads.length > 0 && (
+            <button
+              onClick={() => { setHideExcluded(h => !h); setPage(1); }}
+              style={{
+                background: hideExcluded ? 'var(--surface2)' : 'transparent',
+                border: `1px solid ${hideExcluded ? 'var(--border2)' : 'var(--border)'}`,
+                color: hideExcluded ? 'var(--text)' : 'var(--muted)',
+                borderRadius: 6, padding: '9px 14px', fontSize: 12,
+                cursor: 'pointer', whiteSpace: 'nowrap',
+              }}
+            >
+              {hideExcluded ? '✓ Hiding excluded' : 'Show excluded'}
+            </button>
+          )}
+
+          {hasActiveFilters && (
+            <button
+              onClick={() => { setSearch(''); setFilterState(''); setFilterCategory(''); setPage(1); }}
+              style={{
+                background: 'var(--surface2)', border: '1px solid var(--border)',
+                color: 'var(--muted)', borderRadius: 6, padding: '9px 14px', fontSize: 13,
+              }}
+            >
+              Clear
+            </button>
+          )}
+
+          <div style={{ width: 1, background: 'var(--border)', margin: '0 4px', alignSelf: 'stretch' }} />
+
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              background: 'var(--surface2)', border: '1px solid var(--border)',
+              color: 'var(--text)', borderRadius: 6, padding: '9px 16px', fontSize: 13,
+              display: 'flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap',
+            }}
+          >
+            ↑ {loadedFiles.length ? 'Add more CSVs' : 'Upload CSVs'}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv"
+            multiple
+            style={{ display: 'none' }}
+            onChange={e => handleFiles(e.target.files)}
+          />
         </div>
-      )}
 
-    </div>
+        {/* ── File summary ── */}
+        {loadedFiles.length > 0 && (
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 13,
+          }}>
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+              <span style={{ color: 'var(--muted)' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)', marginRight: 5 }}>
+                  {loadedFiles.length}
+                </span>
+                files loaded
+              </span>
+              <span style={{ color: 'var(--muted)' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)', marginRight: 5 }}>
+                  {stats?.totalRows.toLocaleString()}
+                </span>
+                rows imported
+              </span>
+              <span style={{ color: 'var(--muted)' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--green)', marginRight: 5 }}>
+                  {stats?.unique.toLocaleString()}
+                </span>
+                unique leads
+              </span>
+              {isProcessing && (
+                <span style={{ color: 'var(--amber)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                  Processing…
+                </span>
+              )}
+            </div>
+            <button
+              onClick={clearAll}
+              style={{
+                background: 'none', border: 'none', color: 'var(--muted)',
+                fontSize: 12, cursor: 'pointer', padding: '2px 6px', borderRadius: 4,
+              }}
+              onMouseOver={e => e.target.style.color = 'var(--red)'}
+              onMouseOut={e => e.target.style.color = 'var(--muted)'}
+            >
+              Clear all
+            </button>
+          </div>
+        )}
+
+        {/* ── Drop zone (shown only when no files) ── */}
+        {loadedFiles.length === 0 && (
+          <div
+            className={`drop-zone ${isDragging ? 'dragging' : ''}`}
+            style={{ padding: '48px 24px', textAlign: 'center', marginBottom: 20 }}
+            onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={onDrop}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <div style={{ fontSize: 28, marginBottom: 10, color: 'var(--muted)' }}>↑</div>
+            <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
+              Drag & drop your Apify CSV exports here
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--muted)' }}>
+              Drop all files at once — duplicates removed automatically
+            </div>
+          </div>
+        )}
+
+        {/* ── Table ── */}
+        {leads.length > 0 && (
+          <>
+            <div style={{
+              border: '1px solid var(--border)', borderRadius: 10,
+              overflow: 'hidden', overflowX: 'auto',
+            }}>
+              <table>
+                <colgroup>
+                  <col style={{ width: '18%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '8%'  }} />
+                  <col style={{ width: '5%'  }} />
+                  <col style={{ width: '5%'  }} />
+                  <col style={{ width: '13%' }} />
+                  <col style={{ width: '13%' }} />
+                  <col style={{ width: '14%' }} />
+                  <col style={{ width: '12%' }} />
+                  <col style={{ width: '5%'  }} />
+                </colgroup>
+                <thead>
+                  <tr>
+                    {[
+                      ['title',        'Business name'],
+                      ['phone',        'Phone'],
+                      ['city',         'City'],
+                      ['state',        'State'],
+                      ['totalScore',   'Rating'],
+                      ['_category',    'Category'],
+                      ['website',      'Website'],
+                      ['emails',       'Email'],
+                      ['founder_name', 'Founder'],
+                    ].map(([col, label]) => (
+                      <th
+                        key={col}
+                        onClick={() => handleSort(col)}
+                        style={{ cursor: 'pointer', userSelect: 'none' }}
+                      >
+                        {label}
+                        {sortCol === col
+                          ? <span style={{ marginLeft: 4, opacity: 0.7 }}>{sortDir === 1 ? '↑' : '↓'}</span>
+                          : <span style={{ marginLeft: 4, opacity: 0.2 }}>↕</span>
+                        }
+                      </th>
+                    ))}
+                    <th>Enrich</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginated.map((lead, i) => {
+                    const isEnriching = !!enriching[lead.title];
+                    const isExcluded  = lead._category === 'EXCLUDED';
+                    return (
+                      <tr key={i} className={isExcluded ? 'excluded' : ''}>
+                        <td title={lead.title} style={{ fontWeight: 500 }}>{lead.title}</td>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                          {lead.phone || '—'}
+                        </td>
+                        <td>{lead.city || '—'}</td>
+                        <td>{lead.state || '—'}</td>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                          {lead.totalScore || '—'}
+                        </td>
+                        <td><Badge category={lead._category} /></td>
+                        <td>
+                          {lead.website ? (
+                            <a
+                              href={lead.website.startsWith('http') ? lead.website : `https://${lead.website}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ color: 'var(--blue)', textDecoration: 'none', fontSize: 12 }}
+                            >
+                              {lead.website.replace(/^https?:\/\/(www\.)?/, '').split('/')[0]}
+                            </a>
+                          ) : '—'}
+                        </td>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                          {lead.emails
+                            ? <span style={{ color: 'var(--green)' }}>{lead.emails.split(',')[0].trim()}</span>
+                            : <span style={{ color: 'var(--muted)' }}>—</span>
+                          }
+                        </td>
+                        <td style={{ fontSize: 12 }}>
+                          {lead.founder_name
+                            ? <span style={{ color: 'var(--text)' }}>{lead.founder_name}</span>
+                            : <span style={{ color: 'var(--muted)' }}>—</span>
+                          }
+                        </td>
+                        <td>
+                          {isExcluded ? null : (
+                            <button
+                              onClick={() => enrichOne(lead)}
+                              disabled={isEnriching || !lead.website}
+                              title={!lead.website ? 'No website' : 'Enrich with AI'}
+                              style={{
+                                background: 'none',
+                                border: '1px solid var(--border)',
+                                color: isEnriching ? 'var(--green)' : 'var(--muted)',
+                                borderRadius: 5, padding: '4px 8px', fontSize: 11,
+                                cursor: lead.website ? 'pointer' : 'not-allowed',
+                                opacity: lead.website ? 1 : 0.3,
+                                display: 'flex', alignItems: 'center', gap: 4,
+                                transition: 'all 0.15s',
+                              }}
+                              onMouseOver={e => { if (lead.website && !isEnriching) e.currentTarget.style.borderColor = 'var(--green)'; }}
+                              onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border)'; }}
+                            >
+                              {isEnriching ? <Spinner /> : '✦'}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* ── Pagination ── */}
+            <div style={{
+              display: 'flex', alignItems: 'center',
+              justifyContent: 'space-between', marginTop: 16,
+            }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)' }}>
+                {filtered.length.toLocaleString()} leads · page {page} of {totalPages}
+              </span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  style={{
+                    background: 'var(--surface2)', border: '1px solid var(--border)',
+                    color: page === 1 ? 'var(--muted)' : 'var(--text)',
+                    borderRadius: 6, padding: '6px 14px', fontSize: 12,
+                    opacity: page === 1 ? 0.4 : 1,
+                    cursor: page === 1 ? 'not-allowed' : 'pointer',
+                  }}
+                >← Prev</button>
+                <button
+                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  style={{
+                    background: 'var(--surface2)', border: '1px solid var(--border)',
+                    color: page === totalPages ? 'var(--muted)' : 'var(--text)',
+                    borderRadius: 6, padding: '6px 14px', fontSize: 12,
+                    opacity: page === totalPages ? 0.4 : 1,
+                    cursor: page === totalPages ? 'not-allowed' : 'pointer',
+                  }}
+                >Next →</button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ── Empty state ── */}
+        {!leads.length && !isProcessing && loadedFiles.length === 0 && (
+          <div style={{ textAlign: 'center', padding: '80px 0', color: 'var(--muted)' }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 40, marginBottom: 14, opacity: 0.3 }}>∅</div>
+            <div style={{ fontSize: 15, marginBottom: 6, color: 'var(--text)' }}>No leads loaded yet</div>
+            <div style={{ fontSize: 13 }}>Upload your Apify CSV exports using the button above</div>
+          </div>
+        )}
+
+      </div>
+    </>
   );
 }
