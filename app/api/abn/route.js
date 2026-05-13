@@ -75,24 +75,30 @@ function matchScore(businessName, resultName) {
 // Confirmed working URL format from API testing.
 
 async function fetchEntityDetails(abn, guid) {
-  const url = `https://abr.business.gov.au/ABRXMLSearch/AbrXmlSearch.asmx/ABRSearchByABNv202001?searchString=${abn}&includeHistoricalDetails=N&authenticationGuid=${guid}`;
+  const url = `https://abr.business.gov.au/ABRXMLSearch/AbrXmlSearch.asmx/ABRSearchByABN?searchString=${abn}&includeHistoricalDetails=N&authenticationGuid=${guid}`;
   try {
     const res = await fetch(url, {
-      headers: { Accept: "text/xml, application/xml" },
+      headers: { Accept: 'text/xml, application/xml' },
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return null;
-    const xml = await res.text();
-    const entityBlock = extractAllXML(xml, "entityType")[0] || "";
-    const entityCode = extractXML(entityBlock, "entityTypeCode") || "";
-    const entityDesc = extractXML(entityBlock, "entityDescription") || "";
-    const hasGST = xml.includes("<goodsAndServicesTax>");
+    let xml = await res.text();
+
+    // Strip default namespace declaration so regex matching works cleanly
+    xml = xml.replace(/xmlns[^"]*"[^"]*"/g, '');
+
+    const entityBlock   = extractAllXML(xml, 'entityType')[0] || '';
+    const entityCode    = extractXML(entityBlock, 'entityTypeCode')    || '';
+    const entityDesc    = extractXML(entityBlock, 'entityDescription') || '';
+    const hasGST        = xml.includes('<goodsAndServicesTax>');
+
     return {
-      entity_type: entityDesc || ENTITY_TYPES[entityCode] || entityCode || "",
-      entity_code: entityCode,
+      entity_type:    entityDesc || ENTITY_TYPES[entityCode] || entityCode || '',
+      entity_code:    entityCode,
       gst_registered: hasGST,
     };
-  } catch {
+  } catch (err) {
+    console.error('fetchEntityDetails error:', err.message);
     return null;
   }
 }
@@ -120,7 +126,8 @@ async function searchABR(name, guid) {
   });
 
   if (!res.ok) throw new Error(`ABR API returned ${res.status}`);
-  return await res.text();
+  const xml = await res.text();
+  return xml.replace(/xmlns[^"]*"[^"]*"/g, '');
 }
 
 // ── Parse XML response ────────────────────────────────────────────────────────
