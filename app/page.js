@@ -468,32 +468,95 @@ function ScrapePanel({ onLeadsFound }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
+  const [allCities, setAllCities] = useState(false);
+  const [cityProgress, setCityProgress] = useState(null); // { current, total, city }
+  const cancelScrapeRef = useRef(false);
+
+  async function runSingleCity(term, targetCity) {
+    const res = await fetch("/api/scrape", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ searchTerm: term, city: targetCity, maxResults }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "Scrape failed");
+    const classified = (data.leads || []).map((lead) => ({
+      ...lead,
+      _category: classifyClient(lead),
+    }));
+    return onLeadsFound(classified);
+  }
 
   async function handleScrape() {
     setScraping(true);
     setResult(null);
     setError("");
-    try {
-      const res = await fetch("/api/scrape", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ searchTerm, city, maxResults }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        setError(data.error || "Scrape failed");
-        setScraping(false);
-        return;
+    cancelScrapeRef.current = false;
+
+    if (allCities) {
+      // Run all 12 cities sequentially
+      let totalAdded = 0;
+      let totalDupes = 0;
+      let totalFound = 0;
+
+      for (let i = 0; i < AU_CITIES.length; i++) {
+        if (cancelScrapeRef.current) break;
+        const targetCity = AU_CITIES[i];
+        setCityProgress({
+          current: i + 1,
+          total: AU_CITIES.length,
+          city: targetCity,
+        });
+
+        try {
+          const { added, duplicates } = await runSingleCity(
+            searchTerm,
+            targetCity,
+          );
+          totalAdded += added;
+          totalDupes += duplicates;
+          totalFound += added + duplicates;
+        } catch (err) {
+          console.warn(`Failed for ${targetCity}:`, err.message);
+        }
+
+        // Polite delay between cities
+        if (i < AU_CITIES.length - 1 && !cancelScrapeRef.current) {
+          await sleep(2000);
+        }
       }
-      const classified = (data.leads || []).map((lead) => ({
-        ...lead,
-        _category: classifyClient(lead),
-      }));
-      const { added, duplicates } = onLeadsFound(classified);
-      setResult({ found: data.count, added, duplicates });
-    } catch (err) {
-      setError(err.message);
+
+      setResult({
+        found: totalFound,
+        added: totalAdded,
+        duplicates: totalDupes,
+      });
+      setCityProgress(null);
+    } else {
+      // Single city
+      try {
+        const res = await fetch("/api/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ searchTerm, city, maxResults }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          setError(data.error || "Scrape failed");
+          setScraping(false);
+          return;
+        }
+        const classified = (data.leads || []).map((lead) => ({
+          ...lead,
+          _category: classifyClient(lead),
+        }));
+        const { added, duplicates } = onLeadsFound(classified);
+        setResult({ found: data.count, added, duplicates });
+      } catch (err) {
+        setError(err.message);
+      }
     }
+
     setScraping(false);
   }
 
@@ -574,6 +637,7 @@ function ScrapePanel({ onLeadsFound }) {
               marginBottom: 12,
             }}
           >
+            {/* Search term */}
             <div style={{ flex: "1 1 200px" }}>
               <div
                 style={{
@@ -591,11 +655,8 @@ function ScrapePanel({ onLeadsFound }) {
                   PRESET_TERMS.includes(searchTerm) ? searchTerm : "__custom__"
                 }
                 onChange={(e) => {
-                  if (e.target.value === "__custom__") {
-                    setSearchTerm("");
-                  } else {
-                    setSearchTerm(e.target.value);
-                  }
+                  if (e.target.value === "__custom__") setSearchTerm("");
+                  else setSearchTerm(e.target.value);
                 }}
                 style={{
                   width: "100%",
@@ -621,31 +682,35 @@ function ScrapePanel({ onLeadsFound }) {
               )}
             </div>
 
-            <div style={{ flex: "0 1 160px" }}>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: "var(--muted)",
-                  marginBottom: 5,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.05em",
-                }}
-              >
-                City
+            {/* City — hidden when running all cities */}
+            {!allCities && (
+              <div style={{ flex: "0 1 160px" }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    marginBottom: 5,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  City
+                </div>
+                <select
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  style={{ width: "100%" }}
+                >
+                  {AU_CITIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
               </div>
-              <select
-                value={city}
-                onChange={(e) => setCity(e.target.value)}
-                style={{ width: "100%" }}
-              >
-                {AU_CITIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
+            )}
 
+            {/* Max results */}
             <div style={{ flex: "0 1 120px" }}>
               <div
                 style={{
@@ -656,7 +721,7 @@ function ScrapePanel({ onLeadsFound }) {
                   letterSpacing: "0.05em",
                 }}
               >
-                Max results
+                Max / city
               </div>
               <select
                 value={maxResults}
@@ -670,28 +735,58 @@ function ScrapePanel({ onLeadsFound }) {
               </select>
             </div>
 
+            {/* Buttons */}
             <div
               style={{
                 flex: "0 0 auto",
                 display: "flex",
                 alignItems: "flex-end",
+                gap: 8,
               }}
             >
+              {/* All cities toggle */}
               <button
-                onClick={handleScrape}
-                disabled={scraping || !searchTerm.trim()}
+                onClick={() => setAllCities((a) => !a)}
+                disabled={scraping}
+                style={{
+                  background: allCities
+                    ? "rgba(62,207,142,0.15)"
+                    : "transparent",
+                  border: `1px solid ${allCities ? "var(--green)" : "var(--border)"}`,
+                  color: allCities ? "var(--green)" : "var(--muted)",
+                  borderRadius: 7,
+                  padding: "9px 14px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  transition: "all 0.15s",
+                }}
+              >
+                {allCities ? "✓ All cities" : "All cities"}
+              </button>
+
+              {/* Scrape button */}
+              <button
+                onClick={
+                  scraping
+                    ? () => {
+                        cancelScrapeRef.current = true;
+                      }
+                    : handleScrape
+                }
+                disabled={!searchTerm.trim()}
                 style={{
                   background: scraping ? "var(--surface2)" : "var(--green)",
-                  color: scraping ? "var(--muted)" : "#0a0a0b",
+                  color: scraping ? "var(--red)" : "#0a0a0b",
                   fontWeight: 600,
                   fontSize: 13,
                   padding: "9px 20px",
                   borderRadius: 7,
-                  cursor: scraping ? "not-allowed" : "pointer",
+                  cursor: searchTerm.trim() ? "pointer" : "not-allowed",
                   display: "flex",
                   alignItems: "center",
                   gap: 7,
-                  border: "none",
+                  border: scraping ? "1px solid var(--border)" : "none",
                   whiteSpace: "nowrap",
                   transition: "all 0.15s",
                 }}
@@ -717,8 +812,10 @@ function ScrapePanel({ onLeadsFound }) {
                         strokeDasharray="14 8"
                       />
                     </svg>
-                    Scraping…
+                    Cancel
                   </>
+                ) : allCities ? (
+                  `⬇ Scrape all ${AU_CITIES.length} cities`
                 ) : (
                   "⬇ Scrape leads"
                 )}
@@ -726,9 +823,54 @@ function ScrapePanel({ onLeadsFound }) {
             </div>
           </div>
 
+          {/* City progress bar */}
+          {cityProgress && (
+            <div style={{ marginBottom: 12 }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  fontSize: 12,
+                  color: "var(--muted)",
+                  marginBottom: 5,
+                }}
+              >
+                <span>
+                  Scraping{" "}
+                  <strong style={{ color: "var(--text)" }}>
+                    {cityProgress.city}
+                  </strong>
+                  …
+                </span>
+                <span style={{ fontFamily: "var(--font-mono)" }}>
+                  {cityProgress.current} / {cityProgress.total}
+                </span>
+              </div>
+              <div
+                style={{
+                  height: 3,
+                  background: "var(--surface2)",
+                  borderRadius: 99,
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    background: "var(--green)",
+                    borderRadius: 99,
+                    width: `${(cityProgress.current / cityProgress.total) * 100}%`,
+                    transition: "width 0.4s ease",
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
           <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
-            Run the same search term across multiple cities for full national
-            coverage. Duplicates are removed automatically.
+            {allCities
+              ? `Will scrape "${searchTerm}" across all ${AU_CITIES.length} Australian cities. Duplicates removed automatically.`
+              : "Run the same search term across multiple cities for full national coverage."}
           </div>
 
           {error && (
@@ -779,7 +921,7 @@ function ScrapePanel({ onLeadsFound }) {
                 <strong style={{ fontFamily: "var(--font-mono)" }}>
                   {result.found}
                 </strong>{" "}
-                found by Google
+                total found
               </span>
             </div>
           )}
@@ -901,6 +1043,8 @@ export default function Home() {
   const [filterState, setFilterState] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
   const [filterScore, setFilterScore] = useState(0);
+  const [filterSource, setFilterSource] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [hideExcluded, setHideExcluded] = useState(true);
 
   const [page, setPage] = useState(1);
@@ -1059,6 +1203,7 @@ export default function Home() {
     setFilterState("");
     setFilterCategory("");
     setFilterScore(0);
+    setFilterSource("");
     setPage(1);
     setEnriching({});
     setEnrichProgress(null);
@@ -1227,6 +1372,7 @@ export default function Home() {
     if (filterCategory && lead._category !== filterCategory) return false;
     if (filterScore > 0 && (Number(lead._score) || 0) < filterScore)
       return false;
+    if (filterSource && lead._source !== filterSource) return false;
     if (search) {
       const q = search.toLowerCase();
       if (
@@ -1263,8 +1409,7 @@ export default function Home() {
     }
     setPage(1);
   };
-  const hasActiveFilters =
-    search || filterState || filterCategory || filterScore > 0;
+  const hasActiveFilters = search || filterState || filterCategory || filterScore > 0 || filterSource;
 
   const handleExport = () => {
     const csv = leadsToCSV(filtered);
@@ -1655,6 +1800,7 @@ export default function Home() {
               </option>
             ))}
           </select>
+          
           {leads.length > 0 && (
             <button
               onClick={() => {
@@ -1817,6 +1963,47 @@ export default function Home() {
             onChange={(e) => handleFiles(e.target.files)}
           />
         </div>
+
+        {/* ── Advanced filters ── */}
+{leads.length > 0 && (
+  <div style={{ marginBottom: 12 }}>
+    <button
+      onClick={() => setShowAdvanced(a => !a)}
+      style={{
+        background: 'none', border: 'none',
+        color: showAdvanced ? 'var(--text)' : 'var(--muted)',
+        fontSize: 12, cursor: 'pointer', padding: '4px 0',
+        display: 'flex', alignItems: 'center', gap: 6,
+        transition: 'color 0.15s',
+      }}
+    >
+      <span style={{ fontSize: 10 }}>{showAdvanced ? '▼' : '▶'}</span>
+      Advanced filters
+      {filterSource && (
+        <span style={{
+          background: 'rgba(62,207,142,0.15)', color: 'var(--green)',
+          borderRadius: 99, padding: '1px 8px', fontSize: 11,
+          fontFamily: 'var(--font-mono)',
+        }}>1 active</span>
+      )}
+    </button>
+
+    {showAdvanced && (
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '10px 0 4px' }}>
+        <select
+          value={filterSource}
+          onChange={e => { setFilterSource(e.target.value); setPage(1); }}
+          style={{ width: 'auto', flex: '0 1 280px' }}
+        >
+          <option value="">All source searches</option>
+          {[...new Set(leads.map(l => l._source).filter(Boolean))].sort().map(s => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+      </div>
+    )}
+  </div>
+)}
 
         {/* ── File summary ── */}
         {loadedFiles.length > 1 && (
