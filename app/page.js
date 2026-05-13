@@ -591,10 +591,16 @@ function ScrapePanel({ onLeadsFound }) {
                   PRESET_TERMS.includes(searchTerm) ? searchTerm : "__custom__"
                 }
                 onChange={(e) => {
-                  if (e.target.value !== "__custom__")
+                  if (e.target.value === "__custom__") {
+                    setSearchTerm("");
+                  } else {
                     setSearchTerm(e.target.value);
+                  }
                 }}
-                style={{ width: "100%", marginBottom: 6 }}
+                style={{
+                  width: "100%",
+                  marginBottom: PRESET_TERMS.includes(searchTerm) ? 0 : 6,
+                }}
               >
                 {PRESET_TERMS.map((t) => (
                   <option key={t} value={t}>
@@ -603,13 +609,16 @@ function ScrapePanel({ onLeadsFound }) {
                 ))}
                 <option value="__custom__">Custom…</option>
               </select>
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Custom search term"
-                style={{ width: "100%" }}
-              />
+              {!PRESET_TERMS.includes(searchTerm) && (
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Enter custom search term…"
+                  style={{ width: "100%" }}
+                  autoFocus
+                />
+              )}
             </div>
 
             <div style={{ flex: "0 1 160px" }}>
