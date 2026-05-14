@@ -1535,6 +1535,7 @@ export default function Home() {
                   color: "var(--green)",
                   letterSpacing: "0.06em",
                   marginBottom: 2,
+                  cursor: "default",
                 }}
               >
                 LEAD SCRAPER
@@ -1545,6 +1546,7 @@ export default function Home() {
                   fontWeight: 600,
                   letterSpacing: "-0.02em",
                   lineHeight: 1,
+                  cursor: "default",
                 }}
               >
                 Buyers Agent Australia
