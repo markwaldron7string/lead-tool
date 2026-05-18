@@ -134,11 +134,7 @@ function ScoreInfoTooltip({ onFilter }) {
   const [pos, setPos] = useState({ top: 0, left: 0 });
   const btnRef = useRef(null);
   const tooltipRef = useRef(null);
-  const [mounted, setMounted] = useState(false);
 
-  useEffect(() => {
-    setMounted(true);
-  }, []);
   useEffect(() => {
     function onDown(e) {
       const inBtn = btnRef.current?.contains(e.target);
@@ -225,7 +221,7 @@ function ScoreInfoTooltip({ onFilter }) {
   ];
 
   const tooltip =
-    visible && mounted
+    visible && typeof document !== "undefined"
       ? createPortal(
           <div
             ref={tooltipRef}
@@ -1367,7 +1363,7 @@ export default function Home() {
   // ── Filter & sort ─────────────────────────────────────────────────────────
 
   let filtered = leads.filter((lead) => {
-    if (hideExcluded && lead._category === "EXCLUDED") return false;
+    if (hideExcluded && lead._category === "EXCLUDED" && filterCategory !== "EXCLUDED") return false;
     if (filterState && lead.state !== filterState) return false;
     if (filterCategory && lead._category !== filterCategory) return false;
     if (filterScore > 0 && (Number(lead._score) || 0) < filterScore)
@@ -1409,10 +1405,11 @@ export default function Home() {
     }
     setPage(1);
   };
-  const hasActiveFilters = search || filterState || filterCategory || filterScore > 0 || filterSource;
+  const hasActiveFilters =
+    search || filterState || filterCategory || filterScore > 0 || filterSource;
 
   const handleExport = () => {
-    const csv = leadsToCSV(filtered);
+    const csv = leadsToCSV(leads);
     const a = Object.assign(document.createElement("a"), {
       href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })),
       download: `buyers_agents_${new Date().toISOString().slice(0, 10)}.csv`,
@@ -1802,7 +1799,7 @@ export default function Home() {
               </option>
             ))}
           </select>
-          
+
           {leads.length > 0 && (
             <button
               onClick={() => {
@@ -1967,45 +1964,71 @@ export default function Home() {
         </div>
 
         {/* ── Advanced filters ── */}
-{leads.length > 0 && (
-  <div style={{ marginBottom: 12 }}>
-    <button
-      onClick={() => setShowAdvanced(a => !a)}
-      style={{
-        background: 'none', border: 'none',
-        color: showAdvanced ? 'var(--text)' : 'var(--muted)',
-        fontSize: 12, cursor: 'pointer', padding: '4px 0',
-        display: 'flex', alignItems: 'center', gap: 6,
-        transition: 'color 0.15s',
-      }}
-    >
-      <span style={{ fontSize: 10 }}>{showAdvanced ? '▼' : '▶'}</span>
-      Advanced filters
-      {filterSource && (
-        <span style={{
-          background: 'rgba(62,207,142,0.15)', color: 'var(--green)',
-          borderRadius: 99, padding: '1px 8px', fontSize: 11,
-          fontFamily: 'var(--font-mono)',
-        }}>1 active</span>
-      )}
-    </button>
+        {leads.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <button
+              onClick={() => setShowAdvanced((a) => !a)}
+              style={{
+                background: "none",
+                border: "none",
+                color: showAdvanced ? "var(--text)" : "var(--muted)",
+                fontSize: 12,
+                cursor: "pointer",
+                padding: "4px 0",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                transition: "color 0.15s",
+              }}
+            >
+              <span style={{ fontSize: 10 }}>{showAdvanced ? "▼" : "▶"}</span>
+              Advanced filters
+              {filterSource && (
+                <span
+                  style={{
+                    background: "rgba(62,207,142,0.15)",
+                    color: "var(--green)",
+                    borderRadius: 99,
+                    padding: "1px 8px",
+                    fontSize: 11,
+                    fontFamily: "var(--font-mono)",
+                  }}
+                >
+                  1 active
+                </span>
+              )}
+            </button>
 
-    {showAdvanced && (
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', padding: '10px 0 4px' }}>
-        <select
-          value={filterSource}
-          onChange={e => { setFilterSource(e.target.value); setPage(1); }}
-          style={{ width: 'auto', flex: '0 1 280px' }}
-        >
-          <option value="">All source searches</option>
-          {[...new Set(leads.map(l => l._source).filter(Boolean))].sort().map(s => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
-      </div>
-    )}
-  </div>
-)}
+            {showAdvanced && (
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  flexWrap: "wrap",
+                  padding: "10px 0 4px",
+                }}
+              >
+                <select
+                  value={filterSource}
+                  onChange={(e) => {
+                    setFilterSource(e.target.value);
+                    setPage(1);
+                  }}
+                  style={{ width: "auto", flex: "0 1 280px" }}
+                >
+                  <option value="">All source searches</option>
+                  {[...new Set(leads.map((l) => l._source).filter(Boolean))]
+                    .sort()
+                    .map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ── File summary ── */}
         {loadedFiles.length > 1 && (
