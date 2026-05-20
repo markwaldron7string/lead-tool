@@ -1,8 +1,8 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Lead Scraper — Buyers Agent Australia",
-  description: "Upload, deduplicate and categorise buyers agent leads from Apify",
+  title: "Lead Scraper",
+  description: "Multi-country buyers agent lead scraper",
 };
 
 export default function RootLayout({ children }) {

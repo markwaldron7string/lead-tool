@@ -8,8 +8,6 @@
 
 const PLACES_URL = 'https://places.googleapis.com/v1/places:searchText';
 
-// Fields to request from the Places API
-// Only request what we need — each field group has a cost tier
 const FIELD_MASK = [
   'places.id',
   'places.displayName',
@@ -27,7 +25,6 @@ const FIELD_MASK = [
   'places.googleMapsUri',
 ].join(',');
 
-// Australian cities with coordinates for location bias
 const AU_CITIES = {
   'Sydney':     { lat: -33.8688, lng: 151.2093 },
   'Melbourne':  { lat: -37.8136, lng: 144.9631 },
@@ -43,7 +40,20 @@ const AU_CITIES = {
   'Geelong':    { lat: -38.1499, lng: 144.3617 },
 };
 
-const STATE_BY_CITY = {
+const NZ_CITIES = {
+  'Auckland':        { lat: -36.8485, lng: 174.7633 },
+  'Wellington':      { lat: -41.2865, lng: 174.7762 },
+  'Christchurch':    { lat: -43.5321, lng: 172.6362 },
+  'Hamilton':        { lat: -37.7870, lng: 175.2793 },
+  'Tauranga':        { lat: -37.6878, lng: 176.1651 },
+  'Dunedin':         { lat: -45.8788, lng: 170.5028 },
+  'Palmerston North':{ lat: -40.3523, lng: 175.6082 },
+  'Nelson':          { lat: -41.2706, lng: 173.2840 },
+  'Rotorua':         { lat: -38.1368, lng: 176.2497 },
+  'New Plymouth':    { lat: -39.0556, lng: 174.0752 },
+};
+
+const AU_STATE_BY_CITY = {
   'Sydney': 'New South Wales', 'Newcastle': 'New South Wales', 'Wollongong': 'New South Wales',
   'Melbourne': 'Victoria', 'Geelong': 'Victoria',
   'Brisbane': 'Queensland', 'Gold Coast': 'Queensland',
@@ -54,11 +64,22 @@ const STATE_BY_CITY = {
   'Hobart': 'Tasmania',
 };
 
+const NZ_REGION_BY_CITY = {
+  'Auckland':         'Auckland',
+  'Wellington':       'Wellington',
+  'Christchurch':     'Canterbury',
+  'Hamilton':         'Waikato',
+  'Tauranga':         'Bay of Plenty',
+  'Dunedin':          'Otago',
+  'Palmerston North': 'Manawatu-Whanganui',
+  'Nelson':           'Nelson',
+  'Rotorua':          'Bay of Plenty',
+  'New Plymouth':     'Taranaki',
+};
+
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ── Parse a Places API result into our lead format ────────────────────────────
-
-function parsePlaceToLead(place, searchTerm, city) {
+function parsePlaceToLead(place, searchTerm, city, regionByCity) {
   const name     = place.displayName?.text || '';
   const address  = place.formattedAddress  || '';
   const phone    = place.internationalPhoneNumber || place.nationalPhoneNumber || '';
@@ -68,12 +89,10 @@ function parsePlaceToLead(place, searchTerm, city) {
   const mapsUrl  = place.googleMapsUri     || '';
   const status   = place.businessStatus    || '';
 
-  // Skip permanently closed businesses
   if (status === 'CLOSED_PERMANENTLY') return null;
 
-  // Extract city and state from address components
   let parsedCity  = city;
-  let parsedState = STATE_BY_CITY[city] || '';
+  let parsedState = regionByCity[city] || '';
   let street      = '';
 
   if (place.addressComponents) {
@@ -112,21 +131,19 @@ function parsePlaceToLead(place, searchTerm, city) {
   };
 }
 
-// ── Fetch one page of results from Places API ─────────────────────────────────
-
-async function fetchPlaces(query, city, pageToken = null) {
+async function fetchPlaces(query, city, citiesMap, regionCode, pageToken = null) {
   const apiKey  = process.env.GOOGLE_PLACES_KEY;
-  const coords  = AU_CITIES[city];
+  const coords  = citiesMap[city];
 
   const body = {
     textQuery:      query,
-    maxResultCount: 20,   // Max allowed per request
+    maxResultCount: 20,
     languageCode:   'en',
-    regionCode:     'AU',
+    regionCode,
     locationBias: {
       circle: {
         center: { latitude: coords.lat, longitude: coords.lng },
-        radius: 50000, // 50km radius
+        radius: 50000,
       },
     },
   };
@@ -156,11 +173,9 @@ async function fetchPlaces(query, city, pageToken = null) {
   };
 }
 
-// ── Main route handler ────────────────────────────────────────────────────────
-
 export async function POST(request) {
   try {
-    const { searchTerm, city, maxResults = 60 } = await request.json();
+    const { searchTerm, city, maxResults = 60, country = 'AU' } = await request.json();
 
     if (!searchTerm?.trim()) {
       return Response.json({ error: 'searchTerm is required' }, { status: 400 });
@@ -176,25 +191,30 @@ export async function POST(request) {
       }, { status: 500 });
     }
 
-    if (!AU_CITIES[city]) {
+    const isNZ       = country === 'NZ';
+    const citiesMap  = isNZ ? NZ_CITIES : AU_CITIES;
+    const regionByCity = isNZ ? NZ_REGION_BY_CITY : AU_STATE_BY_CITY;
+    const regionCode = isNZ ? 'NZ' : 'AU';
+    const countryName = isNZ ? 'New Zealand' : 'Australia';
+
+    if (!citiesMap[city]) {
       return Response.json({
-        error: `Unknown city "${city}". Valid options: ${Object.keys(AU_CITIES).join(', ')}`,
+        error: `Unknown city "${city}". Valid options: ${Object.keys(citiesMap).join(', ')}`,
       }, { status: 400 });
     }
 
-    const query    = `${searchTerm.trim()} ${city} Australia`;
+    const query    = `${searchTerm.trim()} ${city} ${countryName}`;
     const allLeads = [];
     const seen     = new Set();
     let   pageToken = null;
     let   pages     = 0;
     const maxPages  = Math.ceil(maxResults / 20);
 
-    // Paginate through results
     while (pages < maxPages && allLeads.length < maxResults) {
-      if (pages > 0) await sleep(2500); // Polite delay between pages
+      if (pages > 0) await sleep(2500);
 
       try {
-        const { places, nextToken } = await fetchPlaces(query, city, pageToken);
+        const { places, nextToken } = await fetchPlaces(query, city, citiesMap, regionCode, pageToken);
 
         for (const place of places) {
           const name = place.displayName?.text || '';
@@ -202,17 +222,16 @@ export async function POST(request) {
           if (!key || seen.has(key)) continue;
           seen.add(key);
 
-          const lead = parsePlaceToLead(place, searchTerm, city);
+          const lead = parsePlaceToLead(place, searchTerm, city, regionByCity);
           if (lead) allLeads.push(lead);
         }
 
         pageToken = nextToken;
         pages++;
 
-        if (!nextToken) break; // No more pages
+        if (!nextToken) break;
       } catch (err) {
         console.error(`Places API fetch error on page ${pages}:`, err.message);
-        // Return what we have so far rather than failing completely
         break;
       }
     }
@@ -222,7 +241,7 @@ export async function POST(request) {
       count:      allLeads.length,
       city,
       searchTerm,
-      pages:      pages,
+      pages,
     });
 
   } catch (err) {
