@@ -10,7 +10,7 @@ export default function HomePage() {
     async function loadCounts() {
       const results = { au: null, nz: null };
       try {
-        const r = await fetch("/leads.csv");
+        const r = await fetch("/leads_au.csv");
         if (r.ok) {
           const text = await r.text();
           const lines = text.trim().split("\n").filter(Boolean);

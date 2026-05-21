@@ -10,7 +10,7 @@ export default function AUPage() {
   return (
     <LeadsPage
       title="Buyers Agent Australia 🇦🇺"
-      csvFile="/leads.csv"
+      csvFile="/leads_au.csv"
       cities={AU_CITIES}
       regionLabel="State"
       businessIdLabel="ABN"
